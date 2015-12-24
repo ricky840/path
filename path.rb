@@ -4,8 +4,6 @@ require 'net/http'
 require 'uri'
 require 'resolv'
 
-#test
-#
 #Location of ghost_grep command in LSG
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
 
@@ -158,15 +156,28 @@ def find_forward_machine(arr_logs)
         next
       end
 
-      #if it was to ICP or Parent
-      if object_status =~ /[g|p]/
+      #if Parent
+      if object_status =~ /p/
         #if the request was forwared to a machine within the same region
         #that is not the case we're looking for
         if not log_line.split[29] == "ERR_DNS_IN_REGION"
-          forward_ipaddr = log_line.split[10]
-          return forward_ipaddr
+          #if it was to parent, it should always include proper parent hostname
+          if ["akamai.net", "akamaiedge.net"].any? { |hostname| log_line.split[23].include? hostname }
+            forward_ipaddr = log_line.split[10]
+            return forward_ipaddr
+          end
         end
       end
+
+      # #if it was to ICP or Parent
+      # if object_status =~ /[g|p]/
+      #   #if the request was forwared to a machine within the same region
+      #   #that is not the case we're looking for
+      #   if not log_line.split[29] == "ERR_DNS_IN_REGION"
+      #     forward_ipaddr = log_line.split[10]
+      #     return forward_ipaddr
+      #   end
+      # end
 
       #if it was forwared to image server
       if object_status =~ /o/ and log_line.split[23].include?("mobile.akadns.net")
