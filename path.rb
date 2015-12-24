@@ -4,6 +4,7 @@ require 'net/http'
 require 'uri'
 require 'resolv'
 require 'ipaddr'
+require 'open3'
 
 #Location of ghost_grep command in LSG
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
@@ -110,7 +111,7 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
     output = %x[#{cmd}]
     output.each_line do |line|
       if line.split.length == NUMBER_OF_FIELDS_R or line.split.length == NUMBER_OF_FIELDS_F
-        logs.push(line)
+        logs.push(line.strip)
       end
     end
 
@@ -265,7 +266,7 @@ forward_index = 0
 while true
 
   if forward_index == forward_server_list.length
-    puts "Fetched all logs"
+    puts "[INFO] Fetched all logs"
     break
   end
 
@@ -282,11 +283,32 @@ while true
     if forward_ips.length > 0
       puts "[INFO] There was a forward machine. Try to fetch logs"
       forward_server_list.concat(forward_ips)
+      puts "[INFO] Server list #{forward_server.inspect} and current index #{forward_index}"
     end
   end
 
   forward_index = forward_index.next
 end #while end
 
-puts
-puts entire_logs.inspect
+puts "[LOG]"
+entire_logs.each do |ipaddress, logs|
+  puts "\n[#{ipaddress}]"
+  logs.each do |log|
+    puts log
+  end
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
