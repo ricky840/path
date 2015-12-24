@@ -3,6 +3,7 @@
 require 'net/http'
 require 'uri'
 require 'resolv'
+require 'ipaddr'
 
 #Location of ghost_grep command in LSG
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
@@ -147,8 +148,10 @@ def find_forward_machine(arr_logs)
     if log_line.split[1] == "f"
 
       object_status = log_line.split[18]
+      forward_hostname = log_line.split[23]
+      forward_err = log_line.split[29]
 
-      #if the log was the part of sureroute then skip
+      # if the log was the part of sureroute then skip
       # t - the request was an sureroute test object
       # l - if part of an sureroute test client and it lost the race
       # w - if part of an Sureroute test client and it won the race
@@ -156,31 +159,40 @@ def find_forward_machine(arr_logs)
         next
       end
 
-      #if Parent
+      #if it was to parent
       if object_status =~ /p/
         #if the request was forwared to a machine within the same region
-        #that is not the case we're looking for
-        if not log_line.split[29] == "ERR_DNS_IN_REGION"
+        #that is not the log we're looking for
+        if not forward_err == "ERR_DNS_IN_REGION"
           #if it was to parent, it should always include proper parent hostname
-          if ["akamai.net", "akamaiedge.net"].any? { |hostname| log_line.split[23].include? hostname }
+          if ["akamai.net", "akamaiedge.net"].any? { |hostname| forward_hostname.include? hostname }
             forward_ipaddr = log_line.split[10]
             return forward_ipaddr
           end
         end
       end
 
-      # #if it was to ICP or Parent
-      # if object_status =~ /[g|p]/
-      #   #if the request was forwared to a machine within the same region
-      #   #that is not the case we're looking for
-      #   if not log_line.split[29] == "ERR_DNS_IN_REGION"
-      #     forward_ipaddr = log_line.split[10]
-      #     return forward_ipaddr
-      #   end
-      # end
+      #if it was to ICP
+      if object_status =~ /g/
+        if not forward_err == "ERR_DNS_IN_REGION"
+          #make sure it has forward hostname as ip address
+          begin
+            forward_icp = IPAddr.new(forward_hostname)
+          rescue IPAddr::InvalidAddressError => error
+            puts "[ERROR] request was forwarded to icp but forward hostname was not an IP address"
+            next
+          end
+
+          first_octet = EdgeIPAddr.split(".")[0]
+          arr_forward_ipaddr = forward_hostname.split(".")
+          arr_forward_ipaddr[0] = first_octet
+
+          return arr_forward_ipaddr.join(".")
+        end
+      end
 
       #if it was forwared to image server
-      if object_status =~ /o/ and log_line.split[23].include?("mobile.akadns.net")
+      if object_status =~ /o/ and forward_hostname.include?("mobile.akadns.net")
         return "image_server"
       end
     end
