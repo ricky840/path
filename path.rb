@@ -232,10 +232,10 @@ prt_header(res)
 
 #Get necessary info to fetch the log
 ReqId = res['X-Akamai-Request-ID'].split(".").reverse
-EdgeIPAddr = %x[dig #{res['X-Cache'].split[2]} +short]
+EdgeIPAddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
 if res['X-Cache'].split[0].include? "MISS"
   if res.key? "X-Cache-Remote"
-    ParentIPAddrFrmHeader = %x[dig #{res['X-Cache-Remote'].split[2]} +short]
+    ParentIPAddrFrmHeader = %x[dig #{res['X-Cache-Remote'].split[2]} +short].strip
   end
 end
 
@@ -269,17 +269,19 @@ while true
     break
   end
 
-  if forward_server_list[forward_index].include? "image_server"
-    puts "[INFO] #{forward_server_list[forward_index]} was found. (not ready yet)"
-  elsif forward_server_list[forward_index] =~ Resolv::IPv4::Regex ? true : false
-    logs = ghost_grep(before_current_time, after_current_time, ReqId[0], forward_server_list[forward_index], server_network)
-    entire_logs[forward_server_list[forward_index]] = logs
+  forward_server = forward_server_list[forward_index]
+
+  if forward_server.include? "image_server"
+    puts "[INFO] #{forward_server} was found. (not ready yet)"
+  elsif forward_server =~ Resolv::IPv4::Regex ? true : false
+    logs = ghost_grep(before_current_time, after_current_time, ReqId[0], forward_server, server_network)
+    entire_logs[forward_server] = logs
 
     #See if there was a forward machine
-    forward_machine_ips = find_forward_machine(logs)
-    if forward_machine_ips.length > 0
+    forward_ips = find_forward_machine(logs)
+    if forward_ips.length > 0
       puts "[INFO] There was a forward machine. Try to fetch logs"
-      forward_server_list.concat(forward_machine_ips)
+      forward_server_list.concat(forward_ips)
     end
   end
 
