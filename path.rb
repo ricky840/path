@@ -144,6 +144,10 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
 end
 
 def find_forward_machine(arr_logs)
+
+  #list of forward IP addresses
+  forward_list = Array.new
+
   arr_logs.each do |log_line|
     if log_line.split[1] == "f"
 
@@ -164,11 +168,11 @@ def find_forward_machine(arr_logs)
         #if the request was forwared to a machine within the same region
         #that is not the log we're looking for
         if not forward_err == "ERR_DNS_IN_REGION"
-          #if it was to parent, it should always include proper parent hostname
-          if ["akamai.net", "akamaiedge.net"].any? { |hostname| forward_hostname.include? hostname }
-            forward_ipaddr = log_line.split[10]
-            return forward_ipaddr
-          end
+          forward_ipaddr = log_line.split[10]
+          forward_list.push(forward_ipaddr)
+
+          #there might be more than one parent
+          next
         end
       end
 
@@ -186,17 +190,21 @@ def find_forward_machine(arr_logs)
           first_octet = EdgeIPAddr.split(".")[0]
           arr_forward_ipaddr = forward_hostname.split(".")
           arr_forward_ipaddr[0] = first_octet
+          forward_list.push(arr_forward_ipaddr.join("."))
 
-          return arr_forward_ipaddr.join(".")
+          next
         end
       end
 
-      #if it was forwared to image server
+      #if it was forwarded to image server
       if object_status =~ /o/ and forward_hostname.include?("mobile.akadns.net")
-        return "image_server"
+        return forward_list.push("image_server #{log_line.split[10]}")
       end
     end
   end
+
+  return forward_list
+
 end
 
 #############################################
@@ -240,7 +248,7 @@ puts "# Request IDs - #{ReqId.inspect}"
 puts "##################################"
 puts
 
-#Give logs sometime to be fetched
+#give ghost sometime to logs are ready
 countdown(5, "Fetching logs in")
 
 #Get time windown +-5 mins of current time
@@ -248,49 +256,35 @@ before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
 after_current_time = (Time.now.utc + TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
 
 #Fetch log
-all_logs = Array.new
+entire_logs = Hash.new
 forward_server_list = [EdgeIPAddr]
-ReqId.each_with_index do |request_id, index|
 
-  logs = ghost_grep(before_current_time, after_current_time, request_id, forward_server_list[index], server_network)
-  all_logs.push(logs)
+#temporary
+forward_index = 0
 
-  #See if there was a forward machine
-  forward_machine_ip = find_forward_machine(logs)
-  if forward_machine_ip =~ Resolv::IPv4::Regex ? true : false
-    puts
-    puts "##################################"
-    puts "Okay there was a forward machine. Fetching next one"
-    puts "##################################"
-    puts
+while true
 
-    forward_server_list.push(forward_machine_ip)
-    next
-  elsif forward_machine_ip == "image_server"
-    puts
-    puts "##################################"
-    puts "Image server was found. Not ready yet ;)"
-    puts "##################################"
-    puts
-    break
-  else
-    puts
-    puts "DONE!"
-    puts
+  if forward_index == forward_server_list.length
+    puts "Fetched all logs"
     break
   end
-end
 
-#Show logs
-puts
-puts "#################################"
-puts "LOGS"
-puts "#################################"
-puts
-all_logs.each_with_index do |each_log, index|
-  puts "[From #{forward_server_list[index].strip}]"
-  each_log.each do |each_log_line|
-    puts each_log_line
+  if forward_server_list[forward_index].include? "image_server"
+    puts "[INFO] #{forward_server_list[forward_index]} was found. (not ready yet)"
+  elsif forward_server_list[forward_index] =~ Resolv::IPv4::Regex ? true : false
+    logs = ghost_grep(before_current_time, after_current_time, ReqId[0], forward_server_list[forward_index], server_network)
+    entire_logs[forward_server_list[forward_index]] = logs
+
+    #See if there was a forward machine
+    forward_machine_ips = find_forward_machine(logs)
+    if forward_machine_ips.length > 0
+      puts "[INFO] There was a forward machine. Try to fetch logs"
+      forward_server_list.concat(forward_machine_ips)
+    end
   end
-  puts
-end
+
+  forward_index = forward_index.next
+end #while end
+
+puts
+puts entire_logs.inspect
