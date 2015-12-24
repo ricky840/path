@@ -4,6 +4,8 @@ require 'net/http'
 require 'uri'
 require 'resolv'
 
+#test
+#
 #Location of ghost_grep command in LSG
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
 
