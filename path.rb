@@ -15,6 +15,7 @@ RETRY_GHOSTGREP = 10
 #Set number of log fields
 NUMBER_OF_FIELDS_F = 58
 NUMBER_OF_FIELDS_R = 75
+NUMBER_OF_FIELDS_S = 59
 
 #Time window(sec) for grep logs
 TIME_WINDOW = 300
@@ -81,8 +82,8 @@ def prt_header(obj)
 end
 
 def countdown(seconds, msg)
-  seconds.downto(1) do |index|
-    print "\r#{msg} #{index}\r"
+  seconds.downto(0) do |index|
+    print "\r#{msg} #{index}"
     $stdout.flush
     sleep 1
   end
@@ -116,7 +117,7 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
     end
 
     output.each_line do |line|
-      if line.split.length == NUMBER_OF_FIELDS_R or line.split.length == NUMBER_OF_FIELDS_F
+      if line.split.length == NUMBER_OF_FIELDS_R or line.split.length == NUMBER_OF_FIELDS_F or line.split.length == NUMBER_OF_FIELDS_S
         logs.push(line.strip)
       end
     end
@@ -126,10 +127,10 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
       break
     elsif logs.length == 0
       puts "No log was found"
-      countdown(10, "Retry in")
+      countdown(9, "Retry in")
     end
 
-    if index == RETRY_GHOSTGREP
+    if index == RETRY_GHOSTGREP - 1
       puts "Could not find any logs from #{ipaddr}. You might want to try manaully with request id #{string}"
     end
   end
@@ -148,6 +149,7 @@ def find_forward_machine(arr_logs)
       object_status = log_line.split[18]
       forward_hostname = log_line.split[23]
       forward_err = log_line.split[29]
+      log_source_ip = log_line.split[0]
 
       # if the log was the part of sureroute then skip
       # t - the request was an sureroute test object
@@ -181,10 +183,11 @@ def find_forward_machine(arr_logs)
             next
           end
 
-          first_octet = EdgeIPAddr.split(".")[0]
+          first_octet = log_source_ip.split(".")[0]
           arr_forward_ipaddr = forward_hostname.split(".")
           arr_forward_ipaddr[0] = first_octet
           forward_list.push(arr_forward_ipaddr.join("."))
+          puts "The request was forwarded to ICP #{forward_icp} and it is changed to #{arr_forward_ipaddr.join(".")}"
 
           next
         end
@@ -270,7 +273,7 @@ while true
     #See if there was a forward machine
     forward_ips = find_forward_machine(logs)
     if forward_ips.length > 0
-      puts "There was a forward machine. Grepping logs from the forward machine"
+      puts "There was a forward machine. grepping logs from the forward server."
       forward_server_list.concat(forward_ips)
       puts "Forward list updated. #{forward_server_list.inspect} and current index is #{forward_index}"
     end
@@ -282,5 +285,9 @@ end #while end
 puts "\n[LOG]"
 forward_server_list.each do |ipaddress|
   puts "\n[#{ipaddress}]"
-  puts entire_logs[ipaddress]
+  if not entire_logs[ipaddress] == nil
+    puts entire_logs[ipaddress]
+  else
+    puts "No log was found"
+  end
 end
