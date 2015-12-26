@@ -9,25 +9,25 @@ require 'open3'
 #Location of ghost_grep command in LSG
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
 
-#Set how many times it will try ghost_grep to fetch logs
+#Set how many times it will try ghost_grep
 RETRY_GHOSTGREP = 10
 
 #Set number of log fields
 NUMBER_OF_FIELDS_F = 58
 NUMBER_OF_FIELDS_R = 75
 
-#Time window(sec) for fetching logs
+#Time window(sec) for grep logs
 TIME_WINDOW = 300
 
-#Network (ff/essl) default freeflow
+#Network (ff/essl) default is freeflow
 server_network = "ff"
 
 unless ARGV.length == 1
-  puts "\n"
+  puts
   puts "Usage:"
   puts "   kurl.rb URL"
   puts "   kurl.rb http://www.foo.com/apple.jpg"
-  puts "\n"
+  puts
   exit
 end
 
@@ -64,23 +64,19 @@ end
 
 def prt_header(obj)
   if obj.class == Net::HTTP::Get
-    puts
-    puts "##################################"
-    puts "# Request Header"
-    puts "##################################"
+    puts "[Request Header]"
     puts "#{obj.method} #{obj.path}"
     obj.each_capitalized do |header, value|
       puts "#{header}: #{value}"
     end
+    puts "\n"
   else
-    puts
-    puts "##################################"
-    puts "# Response Header"
-    puts "##################################"
+    puts "[Response Header]"
     puts "#{obj.code} #{obj.message}"
     obj.each_capitalized do |header, value|
       puts "#{header}: #{value}"
     end
+    puts "\n"
   end
 end
 
@@ -93,22 +89,21 @@ end
 
 def ghost_grep(start_time, end_time, string, ipaddr, network)
   cmd = "#{GG} --#{network} --use-normandy --range=#{start_time}-#{end_time} #{string} #{ipaddr}"
-  puts
-  puts "##################################"
-  puts "Running #{cmd}"
-  puts "##################################"
-  puts
+  # puts "Running #{cmd}"
+  puts "Running ghost_grep on #{ipaddr}"
 
   logs = Array.new
 
   RETRY_GHOSTGREP.times do |index|
-    puts
-    puts "##################################"
     puts "#{index} attempt"
-    puts "##################################"
-    puts
 
-    output = %x[#{cmd}]
+    #use %x to see status of ghost_grep
+    #output = %x[#{cmd}]
+
+    Open3.popen3(cmd) do |stdin, stdout, stderr, wait_thr|
+      output = stdout.read
+    end
+
     output.each_line do |line|
       if line.split.length == NUMBER_OF_FIELDS_R or line.split.length == NUMBER_OF_FIELDS_F
         logs.push(line.strip)
@@ -116,27 +111,16 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
     end
 
     if logs.length > 0
-      puts
-      puts "##################################"
-      puts "Yay we got the logs!"
-      puts "##################################"
-      puts
+      puts "Grepped log successfully"
       break
     elsif logs.length == 0
-      puts
-      puts "##################################"
-      puts "Grrrrrr no log was found"
-      puts "##################################"
-      puts
-      countdown(10, "Retry to fetch logs in")
+      puts "No log was found"
+      countdown(10, "Try again in")
     end
 
     if index == RETRY_GHOSTGREP
-      puts
-      puts "##################################"
       puts "Could not find any logs for #{url}"
       puts "Bye!"
-      puts
       exit
     end
   end
@@ -184,7 +168,7 @@ def find_forward_machine(arr_logs)
           begin
             forward_icp = IPAddr.new(forward_hostname)
           rescue IPAddr::InvalidAddressError => error
-            puts "[ERROR] request was forwarded to icp but forward hostname was not an IP address"
+            puts "Request was forwarded to icp but forward hostname was not an IP address"
             next
           end
 
@@ -241,16 +225,12 @@ if res['X-Cache'].split[0].include? "MISS"
 end
 
 #Print info
-puts
-puts "##################################"
-puts "# Edge IP - #{EdgeIPAddr}"
-puts "# Parent IP - #{defined?(ParentIPAddrFrmHeader) ? ParentIPAddrFrmHeader : 'nope, no parent this time'}"
-puts "# Request IDs - #{ReqId.inspect}"
-puts "##################################"
-puts
+puts "Edge IP - #{EdgeIPAddr}"
+puts "Parent IP - #{defined?(ParentIPAddrFrmHeader) ? ParentIPAddrFrmHeader : 'nope, no parent this time'}"
+puts "Request IDs - #{ReqId.inspect}"
 
 #give ghost sometime to logs are ready
-countdown(5, "Fetching logs in")
+countdown(5, "Fetch logs in")
 
 #Get time windown +-5 mins of current time
 before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
@@ -266,14 +246,14 @@ forward_index = 0
 while true
 
   if forward_index == forward_server_list.length
-    puts "[INFO] Fetched all logs"
+    puts "Fetched all logs"
     break
   end
 
   forward_server = forward_server_list[forward_index]
 
   if forward_server.include? "image_server"
-    puts "[INFO] #{forward_server} was found. (not ready yet)"
+    puts "#{forward_server} was found. (not ready yet)"
   elsif forward_server =~ Resolv::IPv4::Regex ? true : false
     logs = ghost_grep(before_current_time, after_current_time, ReqId[0], forward_server, server_network)
     entire_logs[forward_server] = logs
@@ -281,9 +261,9 @@ while true
     #See if there was a forward machine
     forward_ips = find_forward_machine(logs)
     if forward_ips.length > 0
-      puts "[INFO] There was a forward machine. Try to fetch logs"
+      puts "There was a forward machine. Try to fetch logs"
       forward_server_list.concat(forward_ips)
-      puts "[INFO] Server list #{forward_server.inspect} and current index #{forward_index}"
+      puts "Server list #{forward_server.inspect} and current index #{forward_index}"
     end
   end
 
@@ -297,18 +277,4 @@ entire_logs.each do |ipaddress, logs|
     puts log
   end
 end
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
