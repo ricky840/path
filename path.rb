@@ -82,9 +82,11 @@ end
 
 def countdown(seconds, msg)
   seconds.downto(1) do |index|
-    puts "#{msg} #{index}"
+    print "\r#{msg} #{index}\r"
+    $stdout.flush
     sleep 1
   end
+  puts "\n"
 end
 
 def ghost_grep(start_time, end_time, string, ipaddr, network)
@@ -95,13 +97,22 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
   logs = Array.new
 
   RETRY_GHOSTGREP.times do |index|
-    puts "#{index} attempt"
+    puts "#{index} attempt in grepping logs from #{ipaddr}"
 
     #use %x to see status of ghost_grep
     #output = %x[#{cmd}]
 
+    output = String.new
+
     Open3.popen3(cmd) do |stdin, stdout, stderr, wait_thr|
+      stdin.close
       output = stdout.read
+      if $?.exited?
+        puts "ghost_grep ran successfully with pid #{$?.pid}"
+      else
+        puts "It seems there was an issue with running ghost_grep. Exitcode: #{$?.exitstatus}"
+        next
+      end
     end
 
     output.each_line do |line|
@@ -115,13 +126,11 @@ def ghost_grep(start_time, end_time, string, ipaddr, network)
       break
     elsif logs.length == 0
       puts "No log was found"
-      countdown(10, "Try again in")
+      countdown(10, "Retry in")
     end
 
     if index == RETRY_GHOSTGREP
-      puts "Could not find any logs for #{url}"
-      puts "Bye!"
-      exit
+      puts "Could not find any logs from #{ipaddr}. You might want to try manaully with request id #{string}"
     end
   end
 
@@ -225,12 +234,12 @@ if res['X-Cache'].split[0].include? "MISS"
 end
 
 #Print info
-puts "Edge IP - #{EdgeIPAddr}"
-puts "Parent IP - #{defined?(ParentIPAddrFrmHeader) ? ParentIPAddrFrmHeader : 'nope, no parent this time'}"
-puts "Request IDs - #{ReqId.inspect}"
+#puts "Edge IP #{EdgeIPAddr}"
+#puts "Parent IP #{defined?(ParentIPAddrFrmHeader) ? ParentIPAddrFrmHeader : 'nope, no parent this time'}"
+#puts "Request IDs #{ReqId.inspect}"
 
 #give ghost sometime to logs are ready
-countdown(5, "Fetch logs in")
+countdown(5, "Starts in")
 
 #Get time windown +-5 mins of current time
 before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
@@ -261,20 +270,17 @@ while true
     #See if there was a forward machine
     forward_ips = find_forward_machine(logs)
     if forward_ips.length > 0
-      puts "There was a forward machine. Try to fetch logs"
+      puts "There was a forward machine. Grepping logs from the forward machine"
       forward_server_list.concat(forward_ips)
-      puts "Server list #{forward_server.inspect} and current index #{forward_index}"
+      puts "Forward list updated. #{forward_server_list.inspect} and current index is #{forward_index}"
     end
   end
 
   forward_index = forward_index.next
 end #while end
 
-puts "[LOG]"
-entire_logs.each do |ipaddress, logs|
+puts "\n[LOG]"
+forward_server_list.each do |ipaddress|
   puts "\n[#{ipaddress}]"
-  logs.each do |log|
-    puts log
-  end
+  puts entire_logs[ipaddress]
 end
-
