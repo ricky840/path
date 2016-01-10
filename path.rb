@@ -97,7 +97,7 @@ end
 def grep_log_imageserver(reqid, server_ip)
   cmd = "nsh #{server_ip} cat /a/logs/web_tomcat/catalina.out | grep #{reqid}"
 
-  image_logs = Array.new
+  image_logs = String.new
   image_server_reqid = String.new
 
   $logger.info "Pulling log to find image server request id"
@@ -134,10 +134,7 @@ def grep_log_imageserver(reqid, server_ip)
       if $?.exited?
         output = stdout.read
         if not output.empty?
-          if not output.split("\n").size == 9 then $logger.warn "The number of image server logs were not 9. Instead #{output.split("\n").size}" end
-          output.each_line do |line|
-            image_logs.push(line.strip)
-          end
+          image_logs = output
         end
       else
         $logger.warn "There was an error with running command. Exitstatus: #{$?.exitstatus}"
@@ -148,20 +145,21 @@ def grep_log_imageserver(reqid, server_ip)
   return image_logs
 end
 
-def find_forward_machine_from_imagelog(arr_logs)
+def find_forward_machine_from_imagelog(raw_logs)
   forward_list = Array.new
 
-  arr_logs.each do |line|
+  raw_logs.each_line do |line|
     log = line.split
-    if log[8] == ":fetch" #there could be multiple :fetch(watermark)
+    if log[8] == ":fetch" #there could be multiple :fetch ex) watermark
       fetch_info = line.scan(/"([^"]*)"/).join(",").split(",")
-      $request_id = fetch_info[6].split(".").reverse.first
-      $logger.info "Request ID was updated. #{$request_id}"
       fetch_info.each do |each|
         if each.split.last =~ Resolv::IPv4::Regex ? true : false
-          forward_list.push(each.split.last)
+          first_edge_ipaddr = each.split.last
+          first_request_id = fetch_info[6].split(".").reverse.first
+          put_request_id(first_edge_ipaddr, first_request_id)
+          forward_list.push(first_edge_ipaddr)
 
-          #we only need the first IP address.
+          #we would only need the first Edge IP address and request ID.
           break
         end
       end
@@ -211,7 +209,7 @@ def ghost_grep(start_time, end_time, reqid, ipaddr, network)
     end
 
     if logs.length > 0
-      $logger.info "Pulled log successfully"
+      $logger.info "Pulled log successfully."
       break
     elsif logs.length == 0
       $logger.info "No log was found"
@@ -238,6 +236,7 @@ def find_forward_machine(arr_logs)
       forward_hostname = log_line.split[23]
       forward_err = log_line.split[29]
       log_source_ip = log_line.split[0]
+      request_id = log_line.split[28].split(".").first #request id should always be the first one
 
       # if the log was the part of sureroute then skip
       # t - the request was an sureroute test object
@@ -254,6 +253,7 @@ def find_forward_machine(arr_logs)
         if not forward_err == "ERR_DNS_IN_REGION"
           forward_ipaddr = log_line.split[10]
           forward_list.push(forward_ipaddr)
+          put_request_id(forward_ipaddr, request_id)
 
           #there might be more than one parent
           next
@@ -275,6 +275,7 @@ def find_forward_machine(arr_logs)
           arr_forward_ipaddr = forward_hostname.split(".")
           arr_forward_ipaddr[0] = first_octet
           forward_list.push(arr_forward_ipaddr.join("."))
+          put_request_id(arr_forward_ipaddr.join("."), request_id)
           $logger.info "The request was forwarded to ICP #{forward_icp} and real IP of the server is #{arr_forward_ipaddr.join(".")}"
 
           next
@@ -283,8 +284,7 @@ def find_forward_machine(arr_logs)
 
       #if it was forwarded to image server
       if object_status =~ /o/ and forward_hostname.include?("mobile.akadns.net")
-        $request_id = log_line.split[28].split(".").first
-        $logger.info "Request ID was updated. #{$request_id}"
+        put_request_id(log_line.split[10], request_id)
         return forward_list.push("image_server #{log_line.split[10]}")
       end
     end
@@ -292,6 +292,20 @@ def find_forward_machine(arr_logs)
 
   return forward_list
 
+end
+
+def get_request_id(ipaddr)
+  return $ip_and_reqid[ipaddr]
+end
+
+def put_request_id(ipaddr, reqid)
+  if not $ip_and_reqid.include? ipaddr
+    $ip_and_reqid[ipaddr] = reqid
+    $logger.info "New request was found: #{ipaddr} - #{reqid} inserted."
+  elsif $ip_and_reqid.include? ipaddr
+    $ip_and_reqid[ipaddr] = reqid
+    $logger.info "New request was found: #{ipaddr} - #{reqid} updated."
+  end
 end
 
 #############################################
@@ -310,8 +324,9 @@ akamai_domain?(uri.host)
 #Create logger
 $logger = Logger.new($stdout)
 $logger.formatter = proc do |severity, datetime, progname, msg|
-  date_format = datetime.strftime('%Y-%m-%d %H:%M:%S')
-  puts "[#{date_format}] #{severity}: #{msg}"
+  #date_format = datetime.strftime('%Y-%m-%d %H:%M:%S')
+  #puts "[#{date_format}] #{severity}: #{msg}"
+  puts "[#{severity}] #{msg}"
 end
 
 #Make a request
@@ -324,31 +339,29 @@ res = http.request(req)
 prt_header(req)
 prt_header(res)
 
-#Get necessary info to fetch the log
-$request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
-EdgeIPAddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
-if res['X-Cache'].split[0].include? "MISS"
-  if res.key? "X-Cache-Remote"
-    ParentIPAddrFrmHeader = %x[dig #{res['X-Cache-Remote'].split[2]} +short].strip
-  end
-end
-
-#Print info
-#puts "Edge IP #{EdgeIPAddr}"
-#puts "Parent IP #{defined?(ParentIPAddrFrmHeader) ? ParentIPAddrFrmHeader : 'nope, no parent this time'}"
-#puts "Request ID #{$request_id}"
-
-#give ghost sometime to logs are ready
+#Make a delay for logs to be ready
 countdown(3, "Starts in")
 
-#Get time windown +-5 mins of current time
+#Get reqid and edge ip
+request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
+edge_ipaddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
+
+#Set time windown +-5 mins of current time
 before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
 after_current_time = (Time.now.utc + TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
 
-#Pull log
+#To save all logs
 entire_logs = Hash.new
-forward_server_list = [EdgeIPAddr]
+
+#IP and reqID pair
+$ip_and_reqid = Hash.new
+put_request_id(edge_ipaddr, request_id)
+
+#forward list in order
+forward_server_list = [edge_ipaddr]
+
 forward_index = 0
+
 while true
   if forward_index == forward_server_list.length
     $logger.info "Fetched all logs"
@@ -359,12 +372,12 @@ while true
 
   if forward_server.include? "image_server"
     $logger.info "#{forward_server} was found."
-    image_logs = grep_log_imageserver($request_id, forward_server.split[1])
+    image_logs = grep_log_imageserver(get_request_id(forward_server.split[1]), forward_server.split[1])
     entire_logs[forward_server] = image_logs
     forward_ips = find_forward_machine_from_imagelog(image_logs)
 
   elsif forward_server =~ Resolv::IPv4::Regex ? true : false
-    logs = ghost_grep(before_current_time, after_current_time, $request_id, forward_server, server_network)
+    logs = ghost_grep(before_current_time, after_current_time, get_request_id(forward_server), forward_server, server_network)
     entire_logs[forward_server] = logs
     forward_ips = find_forward_machine(logs)
   end
