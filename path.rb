@@ -87,7 +87,7 @@ end
 
 def countdown(seconds, msg)
   seconds.downto(0) do |index|
-    print "\r#{msg} #{index}"
+    print "\r[INFO] #{msg} #{index}"
     $stdout.flush
     sleep 1
   end
@@ -249,7 +249,7 @@ def find_forward_machine(arr_logs)
         #that is not the log we're looking for
         if not forward_err == "ERR_DNS_IN_REGION"
           forward_ipaddr = log_line.split[10]
-          forward_list.push(put_request_id(forward_ipaddr, request_id))
+          forward_list.push(put_request_id("parent #{forward_ipaddr}", request_id))
 
           #there might be more than one parent
           next
@@ -270,7 +270,7 @@ def find_forward_machine(arr_logs)
           first_octet = log_source_ip.split(".")[0]
           arr_forward_ipaddr = forward_hostname.split(".")
           arr_forward_ipaddr[0] = first_octet
-          forward_list.push(put_request_id(arr_forward_ipaddr.join("."), request_id))
+          forward_list.push(put_request_id("icp " + arr_forward_ipaddr.join("."), request_id))
           $logger.info "The request was forwarded to ICP #{forward_icp} and real IP of the server is #{arr_forward_ipaddr.join(".")}"
 
           next
@@ -301,7 +301,7 @@ def put_request_id(ipaddr, reqid)
       $logger.info "New request was found: #{ipaddr} - #{reqid} inserted."
       break
     elsif $ip_and_reqid.include? ipaddr
-      ipaddr = ipaddr + "_" + index.to_s
+      ipaddr = ipaddr.split.last.split("_").first + "_" + index.to_s
       index = index + 1
     end
   end
@@ -365,20 +365,21 @@ forward_index = 0
 
 while true
   if forward_index == forward_server_list.length
-    $logger.info "Completed fetching logs."
+    $logger.info "Completed."
     break
   end
 
   forward_server = forward_server_list[forward_index]
+  forward_server_ip = forward_server.split.last.split("_").first
 
   if forward_server.include? "image_server"
     $logger.info "#{forward_server} was found."
-    image_logs = grep_log_imageserver(get_request_id(forward_server.split[1]), forward_server.split[1])
+    image_logs = grep_log_imageserver(get_request_id(forward_server.split[1]), forward_server_ip)
     entire_logs[forward_server] = image_logs
     forward_ips = find_forward_machine_from_imagelog(image_logs)
 
-  elsif forward_server =~ Resolv::IPv4::Regex ? true : false
-    logs = ghost_grep(before_current_time, after_current_time, get_request_id(forward_server), forward_server, server_network)
+  elsif forward_server_ip =~ Resolv::IPv4::Regex ? true : false
+    logs = ghost_grep(before_current_time, after_current_time, get_request_id(forward_server), forward_server_ip, server_network)
     entire_logs[forward_server] = logs
     forward_ips = find_forward_machine(logs)
   end
