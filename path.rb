@@ -13,7 +13,7 @@ GG = "/usr/local/akamai/tools/bin/ghost_grep"
 #Set how many times it will try ghost_grep
 RETRY_GHOSTGREP = 10
 
-#Set how many times it will try grep logs from image server
+#Set how many times it will try grep logs from image server(not implemented yet)
 RETRY_IMAGE_LOG = 3
 
 #Set number of log fields
@@ -48,7 +48,7 @@ def akamai_domain?(domain)
 end
 
 def valid_url?(url)
-  uri = URI.parse(url)
+  uri = URI.parse(URI.encode(url))
   if not uri.kind_of?(URI::HTTP)
     puts "URL is not valid"
     exit
@@ -108,17 +108,15 @@ def grep_log_imageserver(reqid, server_ip)
       case output.split("\n").size
         when 0
           $logger.info "Could not find any logs from image server."
-        when 1
+        else
           $logger.info "Found log, validating.."
-          if output.split[7] == ":ghost-auth-data"
+          if output.split[7] == ":ghost-auth-data" #only need the one requested by ghost
             auth_data = output.scan(/"([^"]*)"/).join.split
             if auth_data[6].include? reqid
               image_server_reqid = output.split[6].strip
               $logger.info "Found the request id [#{output.split[6]}] from the image server."
             end
           end
-        else
-          $logger.warn "Found more than 1 log, what should I do?"
       end
     else
       $logger.warn "There was an error with running command. Exitstatus: #{$?.exitstatus}"
@@ -156,8 +154,7 @@ def find_forward_machine_from_imagelog(raw_logs)
         if each.split.last =~ Resolv::IPv4::Regex ? true : false
           first_edge_ipaddr = each.split.last
           first_request_id = fetch_info[6].split(".").reverse.first
-          put_request_id(first_edge_ipaddr, first_request_id)
-          forward_list.push(first_edge_ipaddr)
+          forward_list.push(put_request_id(first_edge_ipaddr, first_request_id))
 
           #we would only need the first Edge IP address and request ID.
           break
@@ -252,8 +249,7 @@ def find_forward_machine(arr_logs)
         #that is not the log we're looking for
         if not forward_err == "ERR_DNS_IN_REGION"
           forward_ipaddr = log_line.split[10]
-          forward_list.push(forward_ipaddr)
-          put_request_id(forward_ipaddr, request_id)
+          forward_list.push(put_request_id(forward_ipaddr, request_id))
 
           #there might be more than one parent
           next
@@ -274,8 +270,7 @@ def find_forward_machine(arr_logs)
           first_octet = log_source_ip.split(".")[0]
           arr_forward_ipaddr = forward_hostname.split(".")
           arr_forward_ipaddr[0] = first_octet
-          forward_list.push(arr_forward_ipaddr.join("."))
-          put_request_id(arr_forward_ipaddr.join("."), request_id)
+          forward_list.push(put_request_id(arr_forward_ipaddr.join("."), request_id))
           $logger.info "The request was forwarded to ICP #{forward_icp} and real IP of the server is #{arr_forward_ipaddr.join(".")}"
 
           next
@@ -284,8 +279,7 @@ def find_forward_machine(arr_logs)
 
       #if it was forwarded to image server
       if object_status =~ /o/ and forward_hostname.include?("mobile.akadns.net")
-        put_request_id(log_line.split[10], request_id)
-        return forward_list.push("image_server #{log_line.split[10]}")
+        return forward_list.push("image_server #{put_request_id(log_line.split[10], request_id)}")
       end
     end
   end
@@ -299,13 +293,20 @@ def get_request_id(ipaddr)
 end
 
 def put_request_id(ipaddr, reqid)
-  if not $ip_and_reqid.include? ipaddr
-    $ip_and_reqid[ipaddr] = reqid
-    $logger.info "New request was found: #{ipaddr} - #{reqid} inserted."
-  elsif $ip_and_reqid.include? ipaddr
-    $ip_and_reqid[ipaddr] = reqid
-    $logger.info "New request was found: #{ipaddr} - #{reqid} updated."
+  index = 1
+
+  while true
+    if not $ip_and_reqid.include? ipaddr
+      $ip_and_reqid[ipaddr] = reqid
+      $logger.info "New request was found: #{ipaddr} - #{reqid} inserted."
+      break
+    elsif $ip_and_reqid.include? ipaddr
+      ipaddr = ipaddr + "_" + index.to_s
+      index = index + 1
+    end
   end
+
+  return ipaddr
 end
 
 #############################################
@@ -364,7 +365,7 @@ forward_index = 0
 
 while true
   if forward_index == forward_server_list.length
-    $logger.info "Fetched all logs"
+    $logger.info "Completed fetching logs."
     break
   end
 
