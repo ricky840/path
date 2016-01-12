@@ -7,13 +7,18 @@ require 'ipaddr'
 require 'open3'
 require 'logger'
 
-#Location of ghost_grep command in LSG
+#Command locations in LSG
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
+ESPRO = "/usr/local/akamai/tools/bin/es_pro"
+CURL = "/usr/bin/curl"
+
+#Location of image server log
+IMAGELOG = "/a/logs/web_tomcat/catalina.out"
 
 #Set how many times it will try ghost_grep
 RETRY_GHOSTGREP = 10
 
-#Set how many times it will try grep logs from image server(not implemented yet)
+#Set how many times it will try grep logs from image server(yet implemented)
 RETRY_IMAGE_LOG = 3
 
 #Set number of log fields
@@ -25,15 +30,16 @@ NUMBER_OF_FIELDS_S = 59
 TIME_WINDOW = 300
 
 #Network (ff/essl) default is freeflow
-server_network = "ff"
+$server_network = "ff"
 
-unless ARGV.length == 1
-  puts
-  puts "Usage:"
-  puts "   kurl.rb URL"
-  puts "   kurl.rb http://www.foo.com/apple.jpg"
-  puts
-  exit
+#Hash that holds forward_machine/request_id
+$ip_and_reqid = Hash.new
+
+#logger
+$logger = Logger.new($stdout)
+$logger.formatter = proc do |severity, datetime, progname, msg|
+  #date_format = datetime.strftime('%Y-%m-%d %H:%M:%S')
+  puts "[#{severity}] #{msg}"
 end
 
 def akamai_domain?(domain)
@@ -55,9 +61,7 @@ def valid_url?(url)
   end
 
   if uri.kind_of?(URI::HTTPS)
-    server_network = "essl"
-    puts "HTTPS is not ready yet ;)"
-    exit
+    $server_network = "essl"
   end
 
   if uri.path.empty?
@@ -75,6 +79,10 @@ def prt_header(obj)
       puts "#{header}: #{value}"
     end
     puts "\n"
+  elsif obj.class == Array
+    obj.each do |header|
+      puts header
+    end
   else
     puts "[Response Header]"
     puts "#{obj.code} #{obj.message}"
@@ -95,7 +103,7 @@ def countdown(seconds, msg)
 end
 
 def grep_log_imageserver(reqid, server_ip)
-  cmd = "nsh #{server_ip} cat /a/logs/web_tomcat/catalina.out | grep #{reqid}"
+  cmd = "nsh #{server_ip} cat #{IMAGELOG} | grep #{reqid}"
 
   image_logs = String.new
   image_server_reqid = String.new
@@ -124,7 +132,7 @@ def grep_log_imageserver(reqid, server_ip)
   end #open3 end
 
   if not image_server_reqid.empty?
-    cmd_greplog = "nsh #{server_ip} cat /a/logs/web_tomcat/catalina.out | grep #{image_server_reqid}"
+    cmd_greplog = "nsh #{server_ip} cat #{IMAGELOG} | grep #{image_server_reqid}"
 
     $logger.info "Pulling image server logs with request id [#{image_server_reqid}]"
     Open3.popen3(cmd_greplog) do |stdin, stdout, stderr, wait_thr|
@@ -285,7 +293,6 @@ def find_forward_machine(arr_logs)
   end
 
   return forward_list
-
 end
 
 def get_request_id(ipaddr)
@@ -309,96 +316,134 @@ def put_request_id(ipaddr, reqid)
   return ipaddr
 end
 
-#############################################
-#
-# Main
-#
-#############################################
-
-#Validate URL
-url = ARGV[0].strip
-uri = valid_url?(url)
-
-#Make sure the domain is on Akamai
-akamai_domain?(uri.host)
-
-#Create logger
-$logger = Logger.new($stdout)
-$logger.formatter = proc do |severity, datetime, progname, msg|
-  #date_format = datetime.strftime('%Y-%m-%d %H:%M:%S')
-  #puts "[#{date_format}] #{severity}: #{msg}"
-  puts "[#{severity}] #{msg}"
+def es_pro(forward)
+  ipaddr = forward.split.last.split("_").first
+  output = %x[#{ESPRO} #{ipaddr}].strip
+  if $?.exitstatus == 1
+    return "[es_pro error]"
+  elsif $?.exitstatus == 0
+    output.each_line do |line|
+      if not line.start_with? "#"
+        edgescape_data = line.split
+        return "[#{edgescape_data[1]} #{edgescape_data[4]} #{edgescape_data[11]} #{edgescape_data[12]}]"
+      end
+    end
+  end
 end
 
-#Make a request
-req = Net::HTTP::Get.new(uri.to_s)
-req['Pragma'] = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
-http = Net::HTTP.new(uri.host, uri.port)
-res = http.request(req)
+############################
 
-#Print headers
-prt_header(req)
-prt_header(res)
+if __FILE__ == $0
 
-#Make a delay for logs to be ready
-countdown(3, "Starts in")
-
-#Get reqid and edge ip
-request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
-edge_ipaddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
-
-#Set time windown +-5 mins of current time
-before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
-after_current_time = (Time.now.utc + TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
-
-#To save all logs
-entire_logs = Hash.new
-
-#IP and reqID pair
-$ip_and_reqid = Hash.new
-put_request_id(edge_ipaddr, request_id)
-
-#forward list in order
-forward_server_list = [edge_ipaddr]
-
-forward_index = 0
-
-while true
-  if forward_index == forward_server_list.length
-    $logger.info "Completed."
-    break
+  unless ARGV.length == 1
+    puts
+    puts "Usage:"
+    puts "   kurl.rb URL"
+    puts "   kurl.rb http://www.foo.com/apple.jpg"
+    puts
+    exit
   end
 
-  forward_server = forward_server_list[forward_index]
-  forward_server_ip = forward_server.split.last.split("_").first
+  #Validate URL
+  url = ARGV[0].strip
+  uri = valid_url?(url)
 
-  if forward_server.include? "image_server"
-    $logger.info "#{forward_server} was found."
-    image_logs = grep_log_imageserver(get_request_id(forward_server.split[1]), forward_server_ip)
-    entire_logs[forward_server] = image_logs
-    forward_ips = find_forward_machine_from_imagelog(image_logs)
+  #Make sure the domain is on Akamai
+  akamai_domain?(uri.host)
 
-  elsif forward_server_ip =~ Resolv::IPv4::Regex ? true : false
-    logs = ghost_grep(before_current_time, after_current_time, get_request_id(forward_server), forward_server_ip, server_network)
-    entire_logs[forward_server] = logs
-    forward_ips = find_forward_machine(logs)
+  case $server_network
+    when 'ff'
+      req = Net::HTTP::Get.new(uri.to_s)
+      req['Pragma'] = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
+      http = Net::HTTP.new(uri.host, uri.port)
+      res = http.request(req)
+      request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
+      edge_ipaddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
+      prt_header(req)
+      prt_header(res)
+    when 'essl'
+      req_header = ["[Request Header]"]
+      res_header = ["[Response Header]"]
+      curl = "#{CURL} -v -k -o /dev/null #{uri.to_s} -H 'Pragma: akamai-x-cache-on, akamai-x-get-request-id'"
+      Open3.popen3(curl) do |stdin, stdout, stderr, wait_thr|
+        stdin.close
+        if $?.exited?
+          output = stderr.read #headers are considered to be debug informations
+          if not output.empty?
+            output.each_line do |line|
+              if line.start_with? ">"
+                req_header.push(line[1..line.length].strip)
+              elsif line.start_with? "<"
+                res_header.push(line[1..line.length].strip)
+              end
+            end
+          end
+        else
+          $logger.warn "There was an error with running command(curl). Exitstatus: #{$?.exitstatus}"
+          exit
+        end
+      end
+      request_id = res_header.detect {|header| header.include? "X-Akamai-Request-ID"}.split(":").last.split(".").reverse.first.strip
+      edge_hostname = res_header.detect {|header| header.include? "X-Cache"}.split(":").last.split[2].strip
+      edge_ipaddr = %x[dig #{edge_hostname} +short].strip
+      prt_header(req_header)
+      prt_header(res_header)
   end
 
-  if forward_ips.length > 0
-    $logger.info "Request was forwarded to #{forward_ips.inspect}"
-    forward_server_list.concat(forward_ips)
-    $logger.info "Forward list updated. #{forward_server_list.inspect} and current index is #{forward_index}"
+  #Make a delay for logs to be ready
+  countdown(3, "Starts in")
+
+  #Set time windown +-5 mins of current time
+  before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
+  after_current_time = (Time.now.utc + TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
+
+  #To save all logs
+  entire_logs = Hash.new
+
+  #IP and reqID pair
+  put_request_id(edge_ipaddr, request_id)
+
+  #forward list in order
+  forward_list = [edge_ipaddr]
+  forward_index = 0
+
+  while true
+    if forward_index == forward_list.length
+      $logger.info "Completed."
+      break
+    end
+
+    forward_next = forward_list[forward_index]
+    forward_server_ip = forward_next.split.last.split("_").first
+
+    if forward_next.include? "image_server"
+      $logger.info "#{forward_next} was found."
+      image_logs = grep_log_imageserver(get_request_id(forward_next.split[1]), forward_server_ip)
+      entire_logs[forward_next] = image_logs
+      forward_ips = find_forward_machine_from_imagelog(image_logs)
+    elsif forward_server_ip =~ Resolv::IPv4::Regex ? true : false
+      logs = ghost_grep(before_current_time, after_current_time, get_request_id(forward_next), forward_server_ip, $server_network)
+      entire_logs[forward_next] = logs
+      forward_ips = find_forward_machine(logs)
+    end
+
+    if forward_ips.length > 0
+      $logger.info "Request was forwarded to #{forward_ips.inspect}"
+      forward_list.concat(forward_ips)
+      $logger.info "Forward list updated. #{forward_list.inspect} and current index is #{forward_index}"
+    end
+
+    forward_index = forward_index.next
+  end #while end
+
+  puts "[LOG]"
+  forward_list.each do |forward|
+    puts "\n[#{forward}] #{es_pro(forward)}"
+    if not entire_logs[forward] == nil
+      puts entire_logs[forward]
+    else
+      puts "No log was found"
+    end
   end
 
-  forward_index = forward_index.next
-end #while end
-
-puts "\n[LOG]"
-forward_server_list.each do |ipaddress|
-  puts "\n[#{ipaddress}]"
-  if not entire_logs[ipaddress] == nil
-    puts entire_logs[ipaddress]
-  else
-    puts "No log was found"
-  end
 end
