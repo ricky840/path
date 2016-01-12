@@ -11,6 +11,7 @@ require 'logger'
 GG = "/usr/local/akamai/tools/bin/ghost_grep"
 ESPRO = "/usr/local/akamai/tools/bin/es_pro"
 CURL = "/usr/bin/curl"
+NSH = "/usr/local/akamai/bin/nsh"
 
 #Location of image server log
 IMAGELOG = "/a/logs/web_tomcat/catalina.out"
@@ -103,7 +104,7 @@ def countdown(seconds, msg)
 end
 
 def grep_log_imageserver(reqid, server_ip)
-  cmd = "nsh #{server_ip} cat #{IMAGELOG} | grep #{reqid}"
+  cmd = "#{NSH} #{server_ip} cat #{IMAGELOG} | grep #{reqid}"
 
   image_logs = String.new
   image_server_reqid = String.new
@@ -132,7 +133,7 @@ def grep_log_imageserver(reqid, server_ip)
   end #open3 end
 
   if not image_server_reqid.empty?
-    cmd_greplog = "nsh #{server_ip} cat #{IMAGELOG} | grep #{image_server_reqid}"
+    cmd_greplog = "#{NSH} #{server_ip} cat #{IMAGELOG} | grep #{image_server_reqid}"
 
     $logger.info "Pulling image server logs with request id [#{image_server_reqid}]"
     Open3.popen3(cmd_greplog) do |stdin, stdout, stderr, wait_thr|
