@@ -159,7 +159,7 @@ def findForwardMachineFromImageLog(raw_logs)
 end
 
 def ghostGrep(start_time, end_time, reqid, ipaddr, network)
-  cmd = "#{GG} --#{network} --use-normandy --range=#{start_time}-#{end_time} #{reqid} #{ipaddr}"
+  cmd = "#{GG} --#{network} --use-normandy --range=#{start_time}-#{end_time} '#{reqid}' #{ipaddr}"
 
   logs = Array.new
 
