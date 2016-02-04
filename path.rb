@@ -317,6 +317,10 @@ if __FILE__ == $0
       options[:quiet] = true
     end
 
+    opts.on('-p', '--progress', 'Show progress(%) and slience output') do
+      options[:progress] = true
+    end
+
     opts.on('-h', '--help', 'Display help') do
       puts opts
       exit
@@ -342,7 +346,11 @@ if __FILE__ == $0
     akamai_domain?(uri.host)
   end
 
-  output_redir = options[:quiet] ? nil : $stdout
+  if options[:quiet] or options[:progress]
+    output_redir = nil
+  else
+    output_redir = $stdout
+  end
   $logger = Logger.new(output_redir)
   $logger.formatter = proc do |severity, datetime, progname, msg|
     puts "\e[0;36m#{severity.downcase}\e[0m #{msg}"
@@ -429,6 +437,16 @@ if __FILE__ == $0
   forward_index = 0
 
   while true
+
+    overall_progress = 0
+
+    if options[:progress]
+      current_progress = (forward_index.to_f / forward_list.length.to_f * 100).to_i
+      overall_progress = current_progress if overall_progress < current_progress
+      print "\rProgress: #{overall_progress}%"
+      $stdout.flush
+    end
+
     if forward_index == forward_list.length
       $logger.info "completed."
       break
