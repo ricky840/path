@@ -1,7 +1,5 @@
 #!/usr/bin/env ruby
 
-#test
-#
 require 'net/http'
 require 'uri'
 require 'resolv'
@@ -15,16 +13,17 @@ ESPRO = "/usr/local/akamai/tools/bin/es_pro"
 CURL = "/usr/bin/curl"
 NSH = "/usr/local/akamai/bin/nsh"
 IMAGELOG = "/a/logs/web_tomcat/catalina.out"
-PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id"
+PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 
-RETRY_GHOSTGREP = 10
+RETRY_GHOSTGREP = 10 #changed to nsh
 TIME_WINDOW = 300 #seconds
-RETRY_DELAY = 9 #seconds
-START_DELAY = 3 #seconds
+RETRY_DELAY = 5 #seconds
+START_DELAY = 3 #seconds - does not use anymore
 
-NUMBER_OF_FIELDS_F = 58
-NUMBER_OF_FIELDS_R = 75
-NUMBER_OF_FIELDS_S = 59
+#does not use anymore
+#NUMBER_OF_FIELDS_F = 59
+#NUMBER_OF_FIELDS_R = 76
+#NUMBER_OF_FIELDS_S = 59
 
 #Network (ff/essl) default is freeflow
 $server_network = "ff"
@@ -161,12 +160,14 @@ def findForwardMachineFromImageLog(raw_logs)
 end
 
 def ghostGrep(start_time, end_time, reqid, ipaddr, network)
-  cmd = "#{GG} --#{network} --use-normandy --range=#{start_time}-#{end_time} '#{reqid}' #{ipaddr}"
+  #cmd = "#{GG} --#{network} --use-normandy --range=#{start_time}-#{end_time} '#{reqid}' #{ipaddr}"
+  cmd = "nsh #{ipaddr} grep #{reqid} /a/logs/ghost.ddc.log.gz"
 
   logs = Array.new
 
   RETRY_GHOSTGREP.times do |index|
-    $logger.info "#{index} attempt, running ghost_grep on #{ipaddr}. request id #{reqid}"
+    #$logger.info "#{index} attempt, running ghost_grep on #{ipaddr}. request id #{reqid}"
+    $logger.info "#{index} attempt. grepping logs from #{ipaddr}. request id #{reqid}"
 
     #use %x to see status of ghost_grep
     #output = %x[#{cmd}]
@@ -174,24 +175,25 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
 
     output.each_line do |line|
       log_line = line.split
-      case log_line.length
-        when NUMBER_OF_FIELDS_R, NUMBER_OF_FIELDS_F, NUMBER_OF_FIELDS_S
-          if log_line[1] == "f" and log_line[28].include? reqid
-            logs.push(line.strip)
-          elsif log_line[1] == "r" and log_line[31].include? reqid
-            logs.push(line.strip)
-          elsif log_line[1] == "S" and log_line[37].include? reqid
-            logs.push(line.strip)
-          end
+
+      #insert server ip to the first element to have the same format as log from ghost_grep
+      log_line.insert(0, ipaddr)
+
+      if log_line[1] == "f"
+        logs.push log_line.join(" ")
+      elsif log_line[1] == "r"
+        logs.push log_line.join(" ")
+      elsif log_line[1] == "S"
+        logs.push log_line.join(" ")
       end
     end
 
     if logs.length > 0
-      $logger.info "okay, we have logs"
+      $logger.info "found logs"
       break
     elsif logs.length == 0
       $logger.info "oops, could not find any logs"
-      countDown(RETRY_DELAY, "will retry in")
+      countDown(RETRY_DELAY, "retry in")
     end
 
     if index == RETRY_GHOSTGREP - 1
@@ -309,7 +311,7 @@ if __FILE__ == $0
   options = {}
 
   optparse = OptionParser.new do |opts|
-    opts.banner = "Usage: kurl.rb [options] URL"
+    opts.banner = "Usage: path.rb [options] URL"
 
     opts.on('-H', '--host HOST', 'Pass host header to server') do |host|
       options[:host] = host
@@ -355,7 +357,7 @@ if __FILE__ == $0
   end
   $logger = Logger.new(output_redir)
   $logger.formatter = proc do |severity, datetime, progname, msg|
-    puts "\e[0;36m#{severity.downcase}\e[0m #{msg}"
+    puts "\e[0;36m[#{severity.upcase}]\e[0m #{msg}"
   end
 
   case $server_network
@@ -420,7 +422,7 @@ if __FILE__ == $0
   end
 
   #Make a delay for logs to be ready
-  countDown(START_DELAY, "starts in")
+  #countDown(START_DELAY, "starts in")
 
   #grep window
   before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
