@@ -18,7 +18,7 @@ PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 RETRY_GHOSTGREP = 10 #changed to nsh
 TIME_WINDOW = 300 #seconds
 RETRY_DELAY = 5 #seconds
-START_DELAY = 3 #seconds - does not use anymore
+START_DELAY = 3 #seconds
 
 #does not use anymore
 #NUMBER_OF_FIELDS_F = 59
@@ -102,7 +102,7 @@ def runCommand(cmd)
 end
 
 def grepLogFromImageServer(reqid, server_ip)
-  cmd = "#{NSH} #{server_ip} cat #{IMAGELOG} | grep #{reqid}"
+  cmd = "#{NSH} #{server_ip} grep #{reqid} #{IMAGELOG}"
 
   image_logs = String.new
   image_server_reqid = String.new
@@ -110,6 +110,7 @@ def grepLogFromImageServer(reqid, server_ip)
   $logger.info "pulling logs from the image server"
 
   output = runCommand(cmd)
+
   case output.split("\n").size
     when 0
       $logger.info "could not find any logs from image server"
@@ -125,7 +126,7 @@ def grepLogFromImageServer(reqid, server_ip)
   end
 
   if not image_server_reqid.empty?
-    cmd2= "#{NSH} #{server_ip} cat #{IMAGELOG} | grep #{image_server_reqid}"
+    cmd2 = "#{NSH} #{server_ip} grep #{image_server_reqid} #{IMAGELOG}"
     $logger.info "getting image log set from image server with request id [#{image_server_reqid}]"
     output2 = runCommand(cmd2)
     if not output2.empty?
@@ -167,7 +168,7 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
 
   RETRY_GHOSTGREP.times do |index|
     #$logger.info "#{index} attempt, running ghost_grep on #{ipaddr}. request id #{reqid}"
-    $logger.info "#{index} attempt. grepping logs from #{ipaddr}. request id #{reqid}"
+    $logger.info "#{index} attempt. grep log from #{ipaddr}. request id #{reqid}"
 
     #use %x to see status of ghost_grep
     #output = %x[#{cmd}]
@@ -298,7 +299,8 @@ def espro(forward)
     output.each_line do |line|
       if not line.start_with? "#"
         edgescape_data = line.split
-        return "[#{edgescape_data[1]} #{edgescape_data[4]} #{edgescape_data[11]} #{edgescape_data[12]}]"
+        #return "[#{edgescape_data[1]} #{edgescape_data[4]} #{edgescape_data[11]} #{edgescape_data[12]}]"
+        return "#{edgescape_data[1]} #{edgescape_data[4]}"
       end
     end
   end
@@ -311,18 +313,30 @@ if __FILE__ == $0
   options = {}
 
   optparse = OptionParser.new do |opts|
-    opts.banner = "Usage: path.rb [options] URL"
+    opts.banner = "Usage: path.rb [options]"
+
+    opts.on('-u', '--url URL', 'Target URL') do |input_url|
+      options[:url] = input_url
+    end
 
     opts.on('-H', '--host HOST', 'Pass host header to server') do |host|
       options[:host] = host
     end
 
-    opts.on('-q', '--quiet', 'Silence output. Print only headers and logs') do
+    opts.on('-q', '--quiet', 'Silence output. Shut up and show me header and logs') do
       options[:quiet] = true
     end
 
     opts.on('-p', '--progress', 'Show progress(%) and slience output') do
       options[:progress] = true
+    end
+
+    opts.on('-r', '--request_id REQUEST_ID', 'Request Id. You must enter ghost Ip(-g) as well') do |input_request_id|
+      options[:request_id] = input_request_id
+    end
+
+    opts.on('-g', '--ghost GHOST_IP', 'Ghost ip address. Request Id(-r) is required') do |input_ghost_ip|
+      options[:ghost_ip] = input_ghost_ip
     end
 
     opts.on('-h', '--help', 'Display help') do
@@ -333,96 +347,114 @@ if __FILE__ == $0
 
   begin
     optparse.parse!
+    if options[:request_id] != nil or options[:ghost_ip] != nil
+      if options[:request_id] == nil or options[:ghost_ip] == nil
+        raise OptionParser::MissingArgument
+      else
+        #validate ghost ip format
+        if not options[:ghost_ip] =~ Resolv::IPv4::Regex ? true : false
+          raise OptionParser::MissingArgument
+        end
+        #we have req/ghost set
+        options[:urldontneed] = true
+      end
+    end
+    if not options[:urldontneed]
+      raise OptionParser::MissingArgument if options[:url].nil?
+    end
   rescue OptionParser::InvalidOption, OptionParser::MissingArgument
     puts optparse
     exit
   end
 
-  unless ARGV.length == 1
-    puts optparse
-    exit
-  end
-
-  url = ARGV[0].strip
-  uri = valid_url?(url)
-
-  if not uri.host =~ Resolv::IPv4::Regex ? true : false
-    akamai_domain?(uri.host)
-  end
+  url = options[:url]
 
   if options[:quiet] or options[:progress]
     output_redir = nil
   else
     output_redir = $stdout
   end
+
+  #first machine
+  request_id = options[:request_id]
+  edge_ipaddr = options[:ghost_ip]
+
   $logger = Logger.new(output_redir)
   $logger.formatter = proc do |severity, datetime, progname, msg|
     puts "\e[0;36m[#{severity.upcase}]\e[0m #{msg}"
   end
 
-  case $server_network
-    when 'ff'
-      req = Net::HTTP::Get.new(uri.to_s)
-      req['Pragma'] = PRAGMA
-      if options[:host] then req['Host'] = options[:host] end
-      http = Net::HTTP.new(uri.host, uri.port)
-      res = http.request(req)
+  #if there was url input
+  if not url.nil?
+    uri = valid_url?(url)
+    if not uri.host =~ Resolv::IPv4::Regex ? true : false
+      akamai_domain?(uri.host)
+    end
 
-      print_header(req, "Request Header")
-      print_header(res, "Response Header")
+    case $server_network
+      when 'ff'
+        req = Net::HTTP::Get.new(uri.to_s)
+        req['Pragma'] = PRAGMA
+        if options[:host] then req['Host'] = options[:host] end
+        http = Net::HTTP.new(uri.host, uri.port)
+        res = http.request(req)
 
-      if not res['X-Akamai-Request-ID'] or not res['X-Cache']
-        $logger.warn "request ID or Edge IP does not exist"
-        exit
-      end
+        print_header(req, "Request Header")
+        print_header(res, "Response Header")
 
-      request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
-      edge_ipaddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
+        if not res['X-Akamai-Request-ID'] or not res['X-Cache']
+          $logger.warn "request ID or Edge IP does not exist"
+          exit
+        end
 
-    when 'essl'
-      curl = "#{CURL} -v -k -o /dev/null '#{uri.to_s}' -H 'Pragma: #{PRAGMA}'"
-      if options[:host] then curl = curl + " -H 'Host: #{options[:host]}'" end
+        request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
+        edge_ipaddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
 
-      req = Array.new
-      res = Array.new
+      when 'essl'
+        curl = "#{CURL} -v -k -o /dev/null '#{uri.to_s}' -H 'Pragma: #{PRAGMA}'"
+        if options[:host] then curl = curl + " -H 'Host: #{options[:host]}'" end
 
-      output = runCommand(curl)
-      if not output.empty?
-        output.each_line do |line|
-          if line.start_with? ">"
-            req.push(line[1..line.length].strip)
-          elsif line.start_with? "<"
-            res.push(line[1..line.length].strip)
+        req = Array.new
+        res = Array.new
+
+        output = runCommand(curl)
+        if not output.empty?
+          output.each_line do |line|
+            if line.start_with? ">"
+              req.push(line[1..line.length].strip)
+            elsif line.start_with? "<"
+              res.push(line[1..line.length].strip)
+            end
+          end
+        else
+          $logger.warn "no response from curl command"
+          exit
+        end
+
+        print_header(req, "Request Header")
+        print_header(res, "Response Header")
+
+        request_id = String.new
+        edge_ipaddr = String.new
+
+        res.each do |res_header|
+          if res_header.split(":").first == "X-Akamai-Request-ID"
+            request_id = res_header.split(":").last.strip.split(".").reverse.first
+          elsif res_header.split(":").first == "X-Cache"
+            edge_hostname = res_header.split(":").last.strip.split[2]
+            edge_ipaddr = %x[dig #{edge_hostname} +short].strip
           end
         end
-      else
-        $logger.warn "no response from curl command"
-        exit
-      end
 
-      print_header(req, "Request Header")
-      print_header(res, "Response Header")
-
-      request_id = String.new
-      edge_ipaddr = String.new
-
-      res.each do |res_header|
-        if res_header.split(":").first == "X-Akamai-Request-ID"
-          request_id = res_header.split(":").last.strip.split(".").reverse.first
-        elsif res_header.split(":").first == "X-Cache"
-          edge_hostname = res_header.split(":").last.strip.split[2]
-          edge_ipaddr = %x[dig #{edge_hostname} +short].strip
+        if request_id.empty? or edge_ipaddr.empty?
+          $logger.warn "request ID or Edge IP does not exist"
+          exit
         end
-      end
-
-      if request_id.empty? or edge_ipaddr.empty?
-        $logger.warn "request ID or Edge IP does not exist"
-        exit
-      end
+    end
   end
 
   #Make a delay for logs to be ready
-  #countDown(START_DELAY, "starts in")
+  countDown(START_DELAY, "starts in")
 
   #grep window
   before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
@@ -452,7 +484,7 @@ if __FILE__ == $0
     end
 
     if forward_index == forward_list.length
-      $logger.info "completed."
+      $logger.info "completed. the logs will be printed in order."
       break
     end
 
@@ -481,7 +513,7 @@ if __FILE__ == $0
 
   puts "\n"
   forward_list.each do |forward|
-    puts "[#{forward}] #{espro(forward)}\n"
+    puts "\e[0;36m[#{forward}] [#{espro(forward)}]\e[0m\n"
     if entire_logs[forward].empty?
       puts "no log was found."
     else
