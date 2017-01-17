@@ -8,14 +8,14 @@ require 'open3'
 require 'logger'
 require 'optparse'
 
-GG = "/usr/local/akamai/tools/bin/ghost_grep"
+#GG = "/usr/local/akamai/tools/bin/ghost_grep"
 ESPRO = "/usr/local/akamai/tools/bin/es_pro"
 CURL = "/usr/bin/curl"
 NSH = "/usr/local/akamai/bin/nsh"
 IMAGELOG = "/a/logs/web_tomcat/catalina.out"
 PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 
-RETRY_GHOSTGREP = 10 #changed to nsh
+$retry_ghostgrep = 10 #changed to nsh
 TIME_WINDOW = 300 #seconds
 RETRY_DELAY = 5 #seconds
 START_DELAY = 3 #seconds
@@ -83,9 +83,14 @@ end
 
 def countDown(seconds, msg)
   seconds.downto(1) do |sec|
-    $logger.info "#{msg} #{sec}"
+    printMsg "\e[0;36m#{msg} #{sec}\e[0m"
     sleep 1
   end
+end
+
+def printMsg(msg)
+  print "#{msg}\r".ljust(10)
+  $stdout.flush
 end
 
 def runCommand(cmd)
@@ -166,9 +171,9 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
 
   logs = Array.new
 
-  RETRY_GHOSTGREP.times do |index|
+  $retry_ghostgrep.times do |index|
     #$logger.info "#{index} attempt, running ghost_grep on #{ipaddr}. request id #{reqid}"
-    $logger.info "#{index} attempt. grep log from #{ipaddr}. request id #{reqid}"
+    $logger.info "#{index}/#{$retry_ghostgrep} attempt. grep log from #{ipaddr}. request id #{reqid}"
 
     #use %x to see status of ghost_grep
     #output = %x[#{cmd}]
@@ -194,10 +199,10 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
       break
     elsif logs.length == 0
       $logger.info "oops, could not find any logs"
-      countDown(RETRY_DELAY, "retry in")
+      countDown(RETRY_DELAY, "Retry in")
     end
 
-    if index == RETRY_GHOSTGREP - 1
+    if index == $retry_ghostgrep - 1
       $logger.warn "failed to logs from #{ipaddr}. might try manaully with request id: #{reqid}"
     end
   end
@@ -240,8 +245,7 @@ def findForwardMachine(arr_logs)
 
       #if it was to ICP
       if object_status =~ /g/
-        if not forward_err == "ERR_DNS_IN_REGION"
-          #make sure it has forward hostname as ip address
+        if not forward_err == "ERR_DNS_IN_REGION" #make sure it has forward hostname as ip address
           begin
             forward_icp = IPAddr.new(forward_hostname)
           rescue IPAddr::InvalidAddressError => error
@@ -300,7 +304,7 @@ def espro(forward)
       if not line.start_with? "#"
         edgescape_data = line.split
         #return "[#{edgescape_data[1]} #{edgescape_data[4]} #{edgescape_data[11]} #{edgescape_data[12]}]"
-        return "#{edgescape_data[1]} #{edgescape_data[4]}"
+        return "#{edgescape_data[1]}, #{edgescape_data[4]}"
       end
     end
   end
@@ -315,31 +319,43 @@ if __FILE__ == $0
   optparse = OptionParser.new do |opts|
     opts.banner = "Usage: path.rb [options]"
 
-    opts.on('-u', '--url URL', 'Target URL') do |input_url|
+    opts.on('-u', '--url URL', 'Target URL.') do |input_url|
       options[:url] = input_url
     end
 
-    opts.on('-H', '--host HOST', 'Pass host header to server') do |host|
-      options[:host] = host
+    input_headers = {}
+    opts.on('-H', '--header NAME:VALUE', 'Pass header to server. Multiple headers(-H) possible.') do |header|
+      header.each do |each_header|
+        begin
+          raise "#{each_header}" if not each_header.split(":").length == 2
+          name, value = each_header.split(":").first.capitalize.strip, each_header.split(":").last.strip
+          value += ", #{PRAGMA}" if name.eql? "Pragma"
+          input_headers[name] = value
+        rescue Exception => e
+          puts "Header(#{e.message}) format should be 'Name: value'"
+          exit
+        end
+      end
+      options[:header] = input_headers if input_headers.length > 0
     end
 
-    opts.on('-q', '--quiet', 'Silence output. Shut up and show me header and logs') do
-      options[:quiet] = true
-    end
-
-    opts.on('-p', '--progress', 'Show progress(%) and slience output') do
-      options[:progress] = true
-    end
-
-    opts.on('-r', '--request_id REQUEST_ID', 'Request Id. You must enter ghost Ip(-g) as well') do |input_request_id|
+    opts.on('-r', '--request_id REQUEST_ID', 'Request Id. You must enter ghost Ip(-g) as well.') do |input_request_id|
       options[:request_id] = input_request_id
     end
 
-    opts.on('-g', '--ghost GHOST_IP', 'Ghost ip address. Request Id(-r) is required') do |input_ghost_ip|
+    opts.on('-t', '--retry RETRY', 'Number of retry on pulling logs from each ghost. Default is 10.') do |num_retry|
+      options[:num_retry] = num_retry.to_i
+    end
+
+    opts.on('-v', '--verbose', 'Show more informations. Noisy output.') do
+      options[:verbose] = true
+    end
+
+    opts.on('-g', '--ghost GHOST_IP', 'Ghost IP address. Request Id(-r) is required.') do |input_ghost_ip|
       options[:ghost_ip] = input_ghost_ip
     end
 
-    opts.on('-h', '--help', 'Display help') do
+    opts.on('-h', '--help', 'Display help.') do
       puts opts
       exit
     end
@@ -368,20 +384,16 @@ if __FILE__ == $0
   end
 
   url = options[:url]
-
-  if options[:quiet] or options[:progress]
-    output_redir = nil
-  else
-    output_redir = $stdout
-  end
+  $retry_ghostgrep = options[:num_retry] if not options[:num_retry].nil?
 
   #first machine
   request_id = options[:request_id]
   edge_ipaddr = options[:ghost_ip]
 
+  output_redir = $stdout if options[:verbose]
   $logger = Logger.new(output_redir)
   $logger.formatter = proc do |severity, datetime, progname, msg|
-    puts "\e[0;36m[#{severity.upcase}]\e[0m #{msg}"
+    puts "\e[0;36m#{severity}:\e[0m #{msg}"
   end
 
   #if there was url input
@@ -395,7 +407,13 @@ if __FILE__ == $0
       when 'ff'
         req = Net::HTTP::Get.new(uri.to_s)
         req['Pragma'] = PRAGMA
-        if options[:host] then req['Host'] = options[:host] end
+
+        if not options[:header].nil?
+          options[:header].each do |header_name, header_value|
+            req[header_name] = header_value
+          end
+        end
+
         http = Net::HTTP.new(uri.host, uri.port)
         res = http.request(req)
 
@@ -412,7 +430,12 @@ if __FILE__ == $0
 
       when 'essl'
         curl = "#{CURL} -v -k -o /dev/null '#{uri.to_s}' -H 'Pragma: #{PRAGMA}'"
-        if options[:host] then curl = curl + " -H 'Host: #{options[:host]}'" end
+
+        if not options[:header].nil?
+          options[:header].each do |header_name, header_value|
+            curl = curl + " -H '#{header_name}: #{header_value}'"
+          end
+        end
 
         req = Array.new
         res = Array.new
@@ -454,7 +477,7 @@ if __FILE__ == $0
   end
 
   #Make a delay for logs to be ready
-  countDown(START_DELAY, "starts in")
+  countDown(START_DELAY, "Start in")
 
   #grep window
   before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
@@ -474,17 +497,8 @@ if __FILE__ == $0
 
   while true
 
-    overall_progress = 0
-
-    if options[:progress]
-      current_progress = (forward_index.to_f / forward_list.length.to_f * 100).to_i
-      overall_progress = current_progress if overall_progress < current_progress
-      print "\rProgress: #{overall_progress}%"
-      $stdout.flush
-    end
-
     if forward_index == forward_list.length
-      $logger.info "completed. the logs will be printed in order."
+      $logger.info "completed."
       break
     end
 
@@ -497,6 +511,7 @@ if __FILE__ == $0
       entire_logs[forward_next] = image_logs
       forward_ips = findForwardMachineFromImageLog(image_logs)
     elsif forward_server_ip =~ Resolv::IPv4::Regex ? true : false
+      printMsg "\e[0;36mCrawling:\e[0m #{forward_server_ip} - #{getRequestId(forward_next)}"
       logs = ghostGrep(before_current_time, after_current_time, getRequestId(forward_next), forward_server_ip, $server_network)
       entire_logs[forward_next] = logs
       forward_ips = findForwardMachine(logs)
@@ -511,7 +526,7 @@ if __FILE__ == $0
     forward_index = forward_index.next
   end #while end
 
-  puts "\n"
+  puts
   forward_list.each do |forward|
     puts "\e[0;36m[#{forward}] [#{espro(forward)}]\e[0m\n"
     if entire_logs[forward].empty?
