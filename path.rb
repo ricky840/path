@@ -89,7 +89,7 @@ def countDown(seconds, msg)
 end
 
 def printMsg(msg)
-  print "#{msg}\r".ljust(10)
+  print "#{msg.ljust(80)}\r"
   $stdout.flush
 end
 
@@ -199,7 +199,7 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
       break
     elsif logs.length == 0
       $logger.info "oops, could not find any logs"
-      countDown(RETRY_DELAY, "Retry in")
+      countDown(RETRY_DELAY, "Retry #{ipaddr} - #{reqid} in")
     end
 
     if index == $retry_ghostgrep - 1
@@ -317,7 +317,7 @@ if __FILE__ == $0
   options = {}
 
   optparse = OptionParser.new do |opts|
-    opts.banner = "Usage: path.rb [options]"
+    opts.banner = "Usage: crawler.rb [options]"
 
     opts.on('-u', '--url URL', 'Target URL.') do |input_url|
       options[:url] = input_url
@@ -507,11 +507,12 @@ if __FILE__ == $0
 
     if forward_next.include? "image_server"
       $logger.info "found #{forward_next}"
+      printMsg "\e[0;36mCrawling:\e[0m #{forward_next} - #{getRequestId(forward_next.split[1])}"
       image_logs = grepLogFromImageServer(getRequestId(forward_next.split[1]), forward_server_ip)
       entire_logs[forward_next] = image_logs
       forward_ips = findForwardMachineFromImageLog(image_logs)
     elsif forward_server_ip =~ Resolv::IPv4::Regex ? true : false
-      printMsg "\e[0;36mCrawling:\e[0m #{forward_server_ip} - #{getRequestId(forward_next)}"
+      printMsg "\e[0;36mCrawling:\e[0m #{forward_next} - #{getRequestId(forward_next)}"
       logs = ghostGrep(before_current_time, after_current_time, getRequestId(forward_next), forward_server_ip, $server_network)
       entire_logs[forward_next] = logs
       forward_ips = findForwardMachine(logs)
