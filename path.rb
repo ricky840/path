@@ -7,6 +7,7 @@ require 'ipaddr'
 require 'open3'
 require 'logger'
 require 'optparse'
+require 'timeout'
 
 #GG = "/usr/local/akamai/tools/bin/ghost_grep"
 ESPRO = "/usr/local/akamai/tools/bin/es_pro"
@@ -15,10 +16,11 @@ NSH = "/usr/local/akamai/bin/nsh"
 IMAGELOG = "/a/logs/web_tomcat/catalina.out"
 PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 
-$retry_ghostgrep = 10 #changed to nsh
+$retry_ghostgrep = 5 #changed to nsh
 TIME_WINDOW = 300 #seconds
 RETRY_DELAY = 3 #seconds
 START_DELAY = 2 #seconds
+$cmdtimeout = 30 #seconds
 
 #does not use anymore
 #NUMBER_OF_FIELDS_F = 59
@@ -82,10 +84,11 @@ def print_header(obj, direction)
 end
 
 def countDown(seconds, msg)
-  seconds.downto(1) do |sec|
+  seconds.downto(0) do |sec|
     printMsg "\e[0;36m#{msg} #{sec} sec\e[0m"
     sleep 1
   end
+  printMsg "\e[0;36m#{msg} now, working..\e[0m"
 end
 
 def printMsg(msg)
@@ -94,15 +97,23 @@ def printMsg(msg)
 end
 
 def runCommand(cmd)
-  Open3.popen3(cmd) do |stdin, stdout, stderr, wait_thr|
-    stdin.close
-    if $?.exited?
-      result = stdout.read
-      if cmd.include? "curl" then result = stderr.read end
-      return result
-    elsif not $?.exitstatus == 0
-      $logger.warn "error occured while running command #{$?.exitstatus}"
+  begin
+    Open3.popen3(cmd) do |stdin, stdout, stderr, wait_thr|
+      Timeout::timeout($cmdtimeout) {
+        stdin.close
+        if $?.exited?
+          result = stdout.read
+          if cmd.include? "curl" then result = stderr.read end
+          return result
+        elsif not $?.exitstatus == 0
+          $logger.warn "error occured while running command #{$?.exitstatus}"
+          return false
+        end
+      }
     end
+  rescue Timeout::Error => e
+    $logger.warn "Timed out"
+    return false
   end
 end
 
@@ -178,19 +189,20 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
     #use %x to see status of ghost_grep
     #output = %x[#{cmd}]
     output = runCommand(cmd)
+    if output
+      output.each_line do |line|
+        log_line = line.split
 
-    output.each_line do |line|
-      log_line = line.split
+        #insert server ip to the first element to have the same format as log from ghost_grep
+        log_line.insert(0, ipaddr)
 
-      #insert server ip to the first element to have the same format as log from ghost_grep
-      log_line.insert(0, ipaddr)
-
-      if log_line[1] == "f" and log_line[28].split(".").include? reqid
-        logs.push log_line.join(" ")
-      elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
-        logs.push log_line.join(" ")
-      elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
-        logs.push log_line.join(" ")
+        if log_line[1] == "f" and log_line[28].split(".").include? reqid
+          logs.push log_line.join(" ")
+        elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
+          logs.push log_line.join(" ")
+        elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
+          logs.push log_line.join(" ")
+        end
       end
     end
 
@@ -211,7 +223,7 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
 end
 
 def purgeObj(ghostip, url)
-  cmd = "nsh #{ghostip} purge #{url}"
+  cmd = "nsh #{ghostip} purge '#{url}'"
   output = runCommand(cmd).split("\n").first
   return false if output == nil
   if output.include? "200"
@@ -360,7 +372,11 @@ if __FILE__ == $0
       options[:num_retry] = num_retry.to_i
     end
 
-    opts.on('-p', '--purge', 'Purge object after pulling logs.') do
+    opts.on('-T', '--timeout TIMEOUT', 'Timeout in seconds for each try. Default is 15.') do |timeout|
+      options[:timeout] = timeout.to_i
+    end
+
+    opts.on('-p', '--purge', 'Purge object after fetching logs. This will purge through ghosts.') do
       options[:purge] = true
     end
 
@@ -401,6 +417,7 @@ if __FILE__ == $0
   end
 
   url = options[:url]
+  $timeout = options[:timeout] if not options[:timeout].nil?
   $retry_ghostgrep = options[:num_retry] if not options[:num_retry].nil?
 
   #first machine
@@ -558,17 +575,41 @@ if __FILE__ == $0
   end
 
   if options[:purge]
-    forward_list.each do |server|
-      ghostip = server.split.last.split("_").first
+    forward_list.each_with_index do |forward, index|
+      ghostip = forward.split.last.split("_").first
+
+      #if url does not exist, use arl from r log
+      arl = nil
+      if url.nil? and index.eql? 0
+        logs = entire_logs[forward]
+        logs.each do |log_line|
+          log_fields = log_line.split
+          case log_fields[1]
+          when "r"
+            arl = log_fields[12]
+            break
+          when "S"
+            protocol = log_fields[20] == "-" ? "http://" : "https://"
+            host = log_fields[32]
+            uri = log_fields[30] == "-" ? "/" : "/" + log_fields[30]
+            arl = protocol + host + uri
+          end
+        end
+      end
+
+      url = arl if not arl.nil?
+      puts "\e[0;36mPurge URL:\e[0m #{url}" if index.eql? 0
+
       printMsg "\e[0;36mPurging:\e[0m #{ghostip}"
       result = purgeObj(ghostip, url)
       if result == true
         printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Success\n"
       elsif result == nil
-        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Obj doesn't exist\n"
+        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Object does not exist\n"
       else
         printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Failed\n"
       end
     end
   end
+
 end #end
