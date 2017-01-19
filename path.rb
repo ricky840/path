@@ -17,8 +17,8 @@ PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 
 $retry_ghostgrep = 10 #changed to nsh
 TIME_WINDOW = 300 #seconds
-RETRY_DELAY = 5 #seconds
-START_DELAY = 3 #seconds
+RETRY_DELAY = 3 #seconds
+START_DELAY = 2 #seconds
 
 #does not use anymore
 #NUMBER_OF_FIELDS_F = 59
@@ -83,7 +83,7 @@ end
 
 def countDown(seconds, msg)
   seconds.downto(1) do |sec|
-    printMsg "\e[0;36m#{msg} #{sec}\e[0m"
+    printMsg "\e[0;36m#{msg} #{sec} sec\e[0m"
     sleep 1
   end
 end
@@ -185,11 +185,11 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
       #insert server ip to the first element to have the same format as log from ghost_grep
       log_line.insert(0, ipaddr)
 
-      if log_line[1] == "f"
+      if log_line[1] == "f" and log_line[28].split(".").include? reqid
         logs.push log_line.join(" ")
-      elsif log_line[1] == "r"
+      elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
         logs.push log_line.join(" ")
-      elsif log_line[1] == "S"
+      elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
         logs.push log_line.join(" ")
       end
     end
@@ -199,7 +199,7 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
       break
     elsif logs.length == 0
       $logger.info "oops, could not find any logs"
-      countDown(RETRY_DELAY, "Retry #{ipaddr} - #{reqid} in")
+      countDown(RETRY_DELAY, "(#{index}/#{$retry_ghostgrep}) Retry #{ipaddr} - #{reqid} in")
     end
 
     if index == $retry_ghostgrep - 1
@@ -208,6 +208,19 @@ def ghostGrep(start_time, end_time, reqid, ipaddr, network)
   end
 
   return logs
+end
+
+def purgeObj(ghostip, url)
+  cmd = "nsh #{ghostip} purge #{url}"
+  output = runCommand(cmd).split("\n").first
+  return false if output == nil
+  if output.include? "200"
+    return true
+  elsif output.include? "404"
+    return nil
+  else
+    return false
+  end
 end
 
 def findForwardMachine(arr_logs)
@@ -345,6 +358,10 @@ if __FILE__ == $0
 
     opts.on('-t', '--retry RETRY', 'Number of retry on pulling logs from each ghost. Default is 10.') do |num_retry|
       options[:num_retry] = num_retry.to_i
+    end
+
+    opts.on('-p', '--purge', 'Purge object after pulling logs.') do
+      options[:purge] = true
     end
 
     opts.on('-v', '--verbose', 'Show more informations. Noisy output.') do
@@ -527,7 +544,9 @@ if __FILE__ == $0
     forward_index = forward_index.next
   end #while end
 
+  puts "\n" if not options[:verbose]
   puts
+
   forward_list.each do |forward|
     puts "\e[0;36m[#{forward}] [#{espro(forward)}]\e[0m\n"
     if entire_logs[forward].empty?
@@ -538,4 +557,18 @@ if __FILE__ == $0
     puts "\n"
   end
 
+  if options[:purge]
+    forward_list.each do |server|
+      ghostip = server.split.last.split("_").first
+      printMsg "\e[0;36mPurging:\e[0m #{ghostip}"
+      result = purgeObj(ghostip, url)
+      if result == true
+        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Success\n"
+      elsif result == nil
+        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Obj doesn't exist\n"
+      else
+        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Failed\n"
+      end
+    end
+  end
 end #end
