@@ -18,7 +18,7 @@ PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 
 $retry_ghostgrep = 5 #changed to nsh
 TIME_WINDOW = 300 #seconds
-RETRY_DELAY = 3 #seconds
+RETRY_DELAY = 5 #seconds
 START_DELAY = 2 #seconds
 $cmdtimeout = 30 #seconds
 
@@ -112,7 +112,7 @@ def runCommand(cmd)
       }
     end
   rescue Timeout::Error => e
-    $logger.warn "Timed out"
+    $logger.warn "Timed out".ljust(80)
     return false
   end
 end
@@ -177,46 +177,55 @@ def findForwardMachineFromImageLog(raw_logs)
 end
 
 def ghostGrep(start_time, end_time, reqid, ipaddr, network)
-  #cmd = "#{GG} --#{network} --use-normandy --range=#{start_time}-#{end_time} '#{reqid}' #{ipaddr}"
-  cmd = "nsh #{ipaddr} grep #{reqid} /a/logs/ghost.ddc.log.gz"
+  commands = ["nsh #{ipaddr} grep #{reqid} /a/logs/ghost.ddc.log.gz", "nsh #{ipaddr} grep #{reqid} /a/logs/ghost.ddc.log"]
 
   logs = Array.new
+  locker = Mutex.new
 
-  $retry_ghostgrep.times do |index|
-    #$logger.info "#{index} attempt, running ghost_grep on #{ipaddr}. request id #{reqid}"
-    $logger.info "#{index}/#{$retry_ghostgrep} attempt. grep log from #{ipaddr}. request id #{reqid}"
+  threads = commands.map do |shellcmd|
+    Thread.new {
+      thread_name = (shellcmd.include? "gz") ? "T1" : "T2"
+      $retry_ghostgrep.times do |index|
+        $logger.info "#{thread_name} (#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}"
+        output = runCommand(shellcmd)
+        if output
+          output.each_line do |line|
+            log_line = line.split
 
-    #use %x to see status of ghost_grep
-    #output = %x[#{cmd}]
-    output = runCommand(cmd)
-    if output
-      output.each_line do |line|
-        log_line = line.split
+            #insert server ip to the first element to have the same format as log from ghost_grep
+            log_line.insert(0, ipaddr)
 
-        #insert server ip to the first element to have the same format as log from ghost_grep
-        log_line.insert(0, ipaddr)
+            if log_line[1] == "f" and log_line[28].split(".").include? reqid
+              log_line = log_line.join(" ")
+              locker.synchronize { logs.push log_line }
+            elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
+              log_line = log_line.join(" ")
+              locker.synchronize { logs.push log_line }
+            elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
+              log_line = log_line.join(" ")
+              locker.synchronize { logs.push log_line }
+            end
+          end
+        end
 
-        if log_line[1] == "f" and log_line[28].split(".").include? reqid
-          logs.push log_line.join(" ")
-        elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
-          logs.push log_line.join(" ")
-        elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
-          logs.push log_line.join(" ")
+        if logs.length > 0
+          $logger.info "#{thread_name} found logs".ljust(80)
+          break
+        elsif logs.length == 0
+          $logger.info "#{thread_name} oops, could not find any logs".ljust(80)
+          countDown(RETRY_DELAY, "(#{index}/#{$retry_ghostgrep}) #{thread_name} retry #{ipaddr} - #{reqid} in")
+        end
+
+        if index == $retry_ghostgrep - 1
+          $logger.warn "#{thread_name} failed #{ipaddr}. might try manaully with request id: #{reqid} :("
         end
       end
-    end
+    }
+  end
 
-    if logs.length > 0
-      $logger.info "found logs"
-      break
-    elsif logs.length == 0
-      $logger.info "oops, could not find any logs"
-      countDown(RETRY_DELAY, "(#{index}/#{$retry_ghostgrep}) Retry #{ipaddr} - #{reqid} in")
-    end
-
-    if index == $retry_ghostgrep - 1
-      $logger.warn "failed to logs from #{ipaddr}. might try manaully with request id: #{reqid}"
-    end
+  threads.each do |t|
+    t.join
+    threads.each { |th| th.kill }
   end
 
   return logs
@@ -561,6 +570,7 @@ if __FILE__ == $0
     forward_index = forward_index.next
   end #while end
 
+  printMsg "\e[0;36mComplete\e[0m"
   puts "\n" if not options[:verbose]
   puts
 
