@@ -9,29 +9,16 @@ require 'logger'
 require 'optparse'
 require 'timeout'
 
-#GG = "/usr/local/akamai/tools/bin/ghost_grep"
 ESPRO = "/usr/local/akamai/tools/bin/es_pro"
 CURL = "/usr/bin/curl"
 NSH = "/usr/local/akamai/bin/nsh"
 IMAGELOG = "/a/logs/web_tomcat/catalina.out"
 PRAGMA = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-cache-remote-on"
 
-$retry_ghostgrep = 5 #changed to nsh
-TIME_WINDOW = 300 #seconds
-RETRY_DELAY = 5 #seconds
+$retry_ghostgrep = 10
+RETRY_DELAY = 0 #0 is 1 seconds
 START_DELAY = 2 #seconds
 $cmdtimeout = 30 #seconds
-
-#does not use anymore
-#NUMBER_OF_FIELDS_F = 59
-#NUMBER_OF_FIELDS_R = 76
-#NUMBER_OF_FIELDS_S = 59
-
-#Network (ff/essl) default is freeflow
-$server_network = "ff"
-
-#Hash that holds forward_machine/request_id
-$ip_and_reqid = Hash.new
 
 def akamai_domain?(domain)
   lookup = %x[dig #{domain} +short].split("\n")
@@ -40,7 +27,7 @@ def akamai_domain?(domain)
       return
     end
   end
-  puts "Hostname is not on Akamai"
+  puts "Entered hostname is not on Akamai"
   exit -1
 end
 
@@ -85,14 +72,15 @@ end
 
 def countDown(seconds, msg)
   seconds.downto(0) do |sec|
-    printMsg "\e[0;36m#{msg} #{sec} sec\e[0m"
+    # printMsg "#{msg} #{sec}"
+    printMsg "#{msg}"
     sleep 1
   end
-  printMsg "\e[0;36m#{msg} now, working..\e[0m"
+  printMsg "#{msg} now, working.."
 end
 
 def printMsg(msg)
-  print "#{msg.ljust(80)}\r"
+  print "\e[0;36m#{msg.ljust(80)}\e[0m\r"
   $stdout.flush
 end
 
@@ -160,15 +148,30 @@ def findForwardMachineFromImageLog(raw_logs)
     log = line.split
     if log[8] == ":fetch" #there could be multiple :fetch ex) watermark
       fetch_info = line.scan(/"([^"]*)"/).join(",").split(",")
+
+      forward_ip_list = []
+      request_ids = fetch_info.last.split(".").reverse
+      request_id_to_grep = request_ids.first
+
       fetch_info.each do |each|
         if each.split.last =~ Resolv::IPv4::Regex ? true : false
-          first_edge_ipaddr = each.split.last
-          first_request_id = fetch_info[6].split(".").reverse.first
-          forward_list.push(putRequestId(first_edge_ipaddr, first_request_id))
-
-          #we would only need the first Edge IP address and request ID.
-          break
+          edge_ipaddr = each.split.last
+          forward_ip_list.push(edge_ipaddr)
         end
+      end
+
+      if forward_ip_list.length == request_ids.length
+        temp = Hash[forward_ip_list.zip(request_ids)]
+        temp.each do |ipaddress, request_id|
+          forward_list.push({
+            :reqid => temp[ipaddress],
+            :forward_ipaddr => ipaddress,
+            :reqid_to_grep => request_id_to_grep,
+            :server_type => ""
+          })
+        end
+      else
+        $logger.warn "error number of request_id and server_ip does not match (image_log)"
       end
     end
   end
@@ -176,56 +179,47 @@ def findForwardMachineFromImageLog(raw_logs)
   return forward_list
 end
 
-def ghostGrep(start_time, end_time, reqid, ipaddr, network)
-  commands = ["nsh #{ipaddr} grep #{reqid} /a/logs/ghost.ddc.log.gz", "nsh #{ipaddr} grep #{reqid} /a/logs/ghost.ddc.log"]
-
+def ghostGrep(reqid, ipaddr, options={})
+  logfile = "/a/logs/ghost.ddc.log.gz"
+  if options[:staging] then logfile = "/a/logs/ghost.ddc.log" end
+  shellcmd = "nsh #{ipaddr} grep #{reqid} #{logfile}"
   logs = Array.new
-  locker = Mutex.new
 
-  threads = commands.map do |shellcmd|
-    Thread.new {
-      thread_name = (shellcmd.include? "gz") ? "T1" : "T2"
-      $retry_ghostgrep.times do |index|
-        $logger.info "#{thread_name} (#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}"
-        output = runCommand(shellcmd)
-        if output
-          output.each_line do |line|
-            log_line = line.split
+  $retry_ghostgrep.times do |index|
+    $logger.info "(#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}"
+    printMsg("(#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}")
 
-            #insert server ip to the first element to have the same format as log from ghost_grep
-            log_line.insert(0, ipaddr)
+    output = runCommand(shellcmd)
+    if output
+      output.each_line do |line|
+        log_line = line.split
 
-            if log_line[1] == "f" and log_line[28].split(".").include? reqid
-              log_line = log_line.join(" ")
-              locker.synchronize { logs.push log_line }
-            elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
-              log_line = log_line.join(" ")
-              locker.synchronize { logs.push log_line }
-            elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
-              log_line = log_line.join(" ")
-              locker.synchronize { logs.push log_line }
-            end
-          end
-        end
+        #insert server ip to the first field to have the same format as ghost_grep log
+        log_line.insert(0, ipaddr)
 
-        if logs.length > 0
-          $logger.info "#{thread_name} found logs".ljust(80)
-          break
-        elsif logs.length == 0
-          $logger.info "#{thread_name} oops, could not find any logs".ljust(80)
-          countDown(RETRY_DELAY, "(#{index}/#{$retry_ghostgrep}) #{thread_name} retry #{ipaddr} - #{reqid} in")
-        end
-
-        if index == $retry_ghostgrep - 1
-          $logger.warn "#{thread_name} failed #{ipaddr}. might try manaully with request id: #{reqid} :("
+        if log_line[1] == "f" and log_line[28].split(".").include? reqid
+          logs.push log_line.join(" ")
+        elsif log_line[1] == "r" and log_line[31].split(".").include? reqid
+          logs.push log_line.join(" ")
+        elsif log_line[1] == "S" and log_line[37].split(".").include? reqid
+          logs.push log_line.join(" ")
         end
       end
-    }
-  end
+    end
 
-  threads.each do |t|
-    t.join
-    threads.each { |th| th.kill }
+    if logs.length > 0
+      $logger.info "#{ipaddr} found logs".ljust(80)
+      printMsg("#{ipaddr} found logs".ljust(80))
+      break
+    elsif logs.length == 0
+      $logger.info "#{ipaddr} oops, could not find any logs".ljust(80)
+      countDown(RETRY_DELAY, "(#{index}/#{$retry_ghostgrep}) retrying on #{ipaddr} - #{reqid}")
+    end
+
+    if index == $retry_ghostgrep - 1
+      $logger.warn "#{ipaddr} #{reqid} failed. try again?"
+      printMsg "#{ipaddr} #{reqid} failed. try again?"
+    end
   end
 
   return logs
@@ -245,17 +239,19 @@ def purgeObj(ghostip, url)
 end
 
 def findForwardMachine(arr_logs)
-
   forward_list = Array.new
-
   arr_logs.each do |log_line|
     if log_line.split[1] == "f"
 
-      object_status = log_line.split[18]
-      forward_hostname = log_line.split[23]
-      forward_err = log_line.split[29]
-      log_source_ip = log_line.split[0]
-      request_id = log_line.split[28].split(".").first #request id should always be the first one
+      log_fields = log_line.split
+      object_status = log_fields[18]
+      forward_hostname = log_fields[23]
+      forward_err = log_fields[29]
+      log_source_ip = log_fields[0]
+      client_ipaddr = log_fields[11]
+      forward_ipaddr = log_fields[10]
+      request_id = log_fields[28].split(".").first #request id should always be the first one
+      request_id_to_grep =  log_fields[28].split(".").reverse.first
 
       # if the log was the part of sureroute then skip
       # t - the request was an sureroute test object
@@ -267,17 +263,22 @@ def findForwardMachine(arr_logs)
 
       #if it was to parent
       if object_status =~ /p/
-        #if the request was forwared to a machine within the same region
-        #that is not the log we're looking for
+        #if the request was forwared to a machine within the same region, that is not the log we're looking for
         if not forward_err == "ERR_DNS_IN_REGION"
-          forward_ipaddr = log_line.split[10]
-          forward_list.push(putRequestId("parent #{forward_ipaddr}", request_id))
-
+          forward_list.push({
+            :reqid => request_id,
+            :reqid_to_grep => request_id_to_grep,
+            :client_ipaddr => client_ipaddr,
+            :forward_ipaddr => forward_ipaddr,
+            :forward_hostname => forward_hostname,
+            :ghost_ip => log_source_ip,
+            :server_type => "parent"
+          })
           next #there might be more than one parent
         end
       end
 
-      #if it was to ICP
+      #if it was to icp
       if object_status =~ /g/
         if not forward_err == "ERR_DNS_IN_REGION" #make sure it has forward hostname as ip address
           begin
@@ -290,8 +291,16 @@ def findForwardMachine(arr_logs)
           first_octet = log_source_ip.split(".")[0]
           arr_forward_ipaddr = forward_hostname.split(".")
           arr_forward_ipaddr[0] = first_octet
-          forward_list.push(putRequestId("icp " + arr_forward_ipaddr.join("."), request_id))
-          $logger.info "forwarded to ICP #{forward_icp}. forward IP was changed to #{arr_forward_ipaddr.join(".")}"
+          forward_list.push({
+            :reqid => request_id,
+            :reqid_to_grep => request_id_to_grep,
+            :client_ipaddr => client_ipaddr,
+            :forward_ipaddr => arr_forward_ipaddr.join("."),
+            :forward_hostname => forward_hostname,
+            :ghost_ip => log_source_ip,
+            :server_type => "icp"
+          })
+          $logger.info "forwarded to icp #{forward_icp}. forward IP was changed to #{arr_forward_ipaddr.join(".")}"
 
           next
         end
@@ -299,33 +308,21 @@ def findForwardMachine(arr_logs)
 
       #if it was forwarded to image server
       if object_status =~ /o/ and forward_hostname.include?("mobile.akadns.net")
-        return forward_list.push("image_server #{putRequestId(log_line.split[10], request_id)}")
+        forward_list.push({
+          :reqid => request_id,
+          :reqid_to_grep => request_id, #image server logs last(latest) request id, not the first one.
+          :client_ipaddr => client_ipaddr,
+          :forward_ipaddr => forward_ipaddr,
+          :forward_hostname => forward_hostname,
+          :ghost_ip => log_source_ip,
+          :server_type => "image_server"
+        })
+        return forward_list
       end
     end
   end
 
   return forward_list
-end
-
-def getRequestId(ipaddr)
-  return $ip_and_reqid[ipaddr]
-end
-
-def putRequestId(ipaddr, reqid)
-  index = 1
-
-  while true
-    if not $ip_and_reqid.include? ipaddr
-      $ip_and_reqid[ipaddr] = reqid
-      $logger.info "new request: #{ipaddr} - #{reqid}"
-      break
-    elsif $ip_and_reqid.include? ipaddr
-      ipaddr = ipaddr.split.last.split("_").first + "_" + index.to_s
-      index = index + 1
-    end
-  end
-
-  return ipaddr
 end
 
 def espro(forward)
@@ -337,7 +334,6 @@ def espro(forward)
     output.each_line do |line|
       if not line.start_with? "#"
         edgescape_data = line.split
-        #return "[#{edgescape_data[1]} #{edgescape_data[4]} #{edgescape_data[11]} #{edgescape_data[12]}]"
         return "#{edgescape_data[1]}, #{edgescape_data[4]}"
       end
     end
@@ -429,7 +425,7 @@ if __FILE__ == $0
   $timeout = options[:timeout] if not options[:timeout].nil?
   $retry_ghostgrep = options[:num_retry] if not options[:num_retry].nil?
 
-  #first machine
+  #start ghost
   request_id = options[:request_id]
   edge_ipaddr = options[:ghost_ip]
 
@@ -446,152 +442,169 @@ if __FILE__ == $0
       akamai_domain?(uri.host)
     end
 
-    case $server_network
-      when 'ff'
-        req = Net::HTTP::Get.new(uri.to_s)
-        req['Pragma'] = PRAGMA
+    curl = "#{CURL} -v -k -o /dev/null '#{uri.to_s}' -H 'Pragma: #{PRAGMA}'"
 
-        if not options[:header].nil?
-          options[:header].each do |header_name, header_value|
-            req[header_name] = header_value
-          end
+    if not options[:header].nil?
+      options[:header].each do |header_name, header_value|
+        curl = curl + " -H '#{header_name}: #{header_value}'"
+      end
+    end
+
+    req = Array.new
+    res = Array.new
+
+    output = runCommand(curl)
+    if not output.empty?
+      output.each_line do |line|
+        if line.start_with? ">"
+          req.push(line[1..line.length].strip)
+        elsif line.start_with? "<"
+          res.push(line[1..line.length].strip)
         end
+      end
+    else
+      $logger.warn "no response from curl command"
+      exit
+    end
 
-        http = Net::HTTP.new(uri.host, uri.port)
-        res = http.request(req)
+    print_header(req, "Request Header")
+    print_header(res, "Response Header")
 
-        print_header(req, "Request Header")
-        print_header(res, "Response Header")
+    request_id = String.new
+    edge_ipaddr = String.new
 
-        if not res['X-Akamai-Request-ID'] or not res['X-Cache']
-          $logger.warn "request ID or Edge IP does not exist"
-          exit
-        end
+    res.each do |res_header|
+      if res_header.split(":").first == "X-Akamai-Request-ID"
+        request_id = res_header.split(":").last.strip.split(".").reverse.first
+      elsif res_header.split(":").first == "X-Cache"
+        edge_hostname = res_header.split(":").last.strip.split[2]
+        edge_ipaddr = %x[dig #{edge_hostname} +short].strip
+      elsif res_header.split(":").first == "X-Akamai-Staging"
+        options[:staging] = true
+      end
+    end
 
-        request_id = res['X-Akamai-Request-ID'].split(".").reverse.first
-        edge_ipaddr = %x[dig #{res['X-Cache'].split[2]} +short].strip
-
-      when 'essl'
-        curl = "#{CURL} -v -k -o /dev/null '#{uri.to_s}' -H 'Pragma: #{PRAGMA}'"
-
-        if not options[:header].nil?
-          options[:header].each do |header_name, header_value|
-            curl = curl + " -H '#{header_name}: #{header_value}'"
-          end
-        end
-
-        req = Array.new
-        res = Array.new
-
-        output = runCommand(curl)
-        if not output.empty?
-          output.each_line do |line|
-            if line.start_with? ">"
-              req.push(line[1..line.length].strip)
-            elsif line.start_with? "<"
-              res.push(line[1..line.length].strip)
-            end
-          end
-        else
-          $logger.warn "no response from curl command"
-          exit
-        end
-
-        print_header(req, "Request Header")
-        print_header(res, "Response Header")
-
-        request_id = String.new
-        edge_ipaddr = String.new
-
-        res.each do |res_header|
-          if res_header.split(":").first == "X-Akamai-Request-ID"
-            request_id = res_header.split(":").last.strip.split(".").reverse.first
-          elsif res_header.split(":").first == "X-Cache"
-            edge_hostname = res_header.split(":").last.strip.split[2]
-            edge_ipaddr = %x[dig #{edge_hostname} +short].strip
-          end
-        end
-
-        if request_id.empty? or edge_ipaddr.empty?
-          $logger.warn "request ID or Edge IP does not exist"
-          exit
-        end
+    if request_id.empty? or edge_ipaddr.empty?
+      $logger.warn "request ID or Edge IP does not exist"
+      exit
     end
   end
 
   #Make a delay for logs to be ready
-  countDown(START_DELAY, "Start in")
+  #countDown(START_DELAY, "Starts in")
 
-  #grep window
-  before_current_time = (Time.now.utc - TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
-  after_current_time = (Time.now.utc + TIME_WINDOW).strftime("%m/%d/%Y/%H:%M")
+  processed_work_list = {}
 
-  #entire logs
-  entire_logs = Hash.new
-
-  #forward machine and reqID pair
-  putRequestId(edge_ipaddr, request_id)
-
-  #forward list in order
-  forward_list = [edge_ipaddr]
-
-  #interate list index
+  forward_list = Array.new
   forward_index = 0
+  forward_list.push({
+    :ghost_ip => edge_ipaddr,
+    :reqid => "",
+    :reqid_to_grep => request_id,
+    :client_ipaddr => "",
+    :forward_ipaddr => "",
+    :forward_hostname => "",
+    :server_type => ""
+  })
 
+  #gogogo
   while true
 
     if forward_index == forward_list.length
-      $logger.info "completed."
+      $logger.info "no more servers left to fetch"
       break
     end
 
-    forward_next = forward_list[forward_index]
-    forward_server_ip = forward_next.split.last.split("_").first
+    number_of_incomplete_forwards = forward_list[forward_index..forward_list.length-1].length
+    $logger.info "#{number_of_incomplete_forwards} server(s) in queue"
+    printMsg("#{number_of_incomplete_forwards} server(s) in queue")
 
-    if forward_next.include? "image_server"
-      $logger.info "found #{forward_next}"
-      printMsg "\e[0;36mCrawling:\e[0m #{forward_next} - #{getRequestId(forward_next.split[1])}"
-      image_logs = grepLogFromImageServer(getRequestId(forward_next.split[1]), forward_server_ip)
-      entire_logs[forward_next] = image_logs
-      forward_ips = findForwardMachineFromImageLog(image_logs)
-    elsif forward_server_ip =~ Resolv::IPv4::Regex ? true : false
-      printMsg "\e[0;36mCrawling:\e[0m #{forward_next} - #{getRequestId(forward_next)}"
-      logs = ghostGrep(before_current_time, after_current_time, getRequestId(forward_next), forward_server_ip, $server_network)
-      entire_logs[forward_next] = logs
-      forward_ips = findForwardMachine(logs)
+    lock = Mutex.new
+    workers = Array.new
+
+    forward_machines_with_duplicates = Array.new
+    (forward_index..forward_list.length-1).each do |index|
+      worker = Thread.new {
+        server = forward_list[index]
+
+        #register
+        lock.synchronize {
+          if processed_work_list[server[:ghost_ip]].nil?
+            processed_work_list[server[:ghost_ip]] = [server[:reqid_to_grep]]
+          else
+            processed_work_list[server[:ghost_ip]].push(server[:reqid_to_grep])
+          end
+        }
+
+        if server[:server_type].include? "image_server"
+          image_logs = grepLogFromImageServer(server[:reqid_to_grep], server[:ghost_ip])
+          lock.synchronize {
+            forward_list[index][:log] = image_logs
+            forward_machines_with_duplicates.concat(findForwardMachineFromImageLog(image_logs))
+          }
+        elsif server[:ghost_ip] =~ Resolv::IPv4::Regex ? true : false
+          logs = ghostGrep(server[:reqid_to_grep], server[:ghost_ip], {:staging => options[:staging]})
+          lock.synchronize {
+            forward_list[index][:log] = logs
+            forward_machines_with_duplicates.concat(findForwardMachine(logs))
+          }
+        end
+      }
+      worker[:name] = "#{forward_list[index][:ghost_ip]}"
+      workers.push(worker)
     end
 
-    if forward_ips.length > 0
-      $logger.info "request was forwarded to #{forward_ips.inspect}"
-      forward_list.concat(forward_ips)
-      $logger.info "forward list updated #{forward_list.inspect}. current index #{forward_index}"
+    workers.each do |t|
+      t.join
+      $logger.info "#{t[:name]} finished"
+      printMsg("#{t[:name]} finished")
     end
 
-    forward_index = forward_index.next
+    #filter out forward_machine has already been processed
+    $logger.info "Processed list for now: #{processed_work_list.inspect}"
+    forward_machines_with_duplicates.each_with_index do |f_line, index|
+      if processed_work_list.key? f_line[:forward_ipaddr] and processed_work_list[f_line[:forward_ipaddr]].include? f_line[:reqid_to_grep]
+        $logger.info "Already processed: #{f_line[:forward_ipaddr]} #{f_line[:reqid_to_grep]}"
+      else #never processed server
+        forward_list.push({
+          :ghost_ip => f_line[:forward_ipaddr],
+          :reqid_to_grep => f_line[:reqid_to_grep],
+          :server_type => f_line[:server_type]
+        })
+        $logger.info "New forward machine #{f_line[:forward_ipaddr]} - #{f_line[:reqid]} found"
+      end
+    end
+
+    #increase pointer
+    forward_index = forward_index + number_of_incomplete_forwards
   end #while end
 
-  printMsg "\e[0;36mComplete\e[0m"
-  puts "\n" if not options[:verbose]
+  printMsg "Complete"
+  puts
   puts
 
-  forward_list.each do |forward|
-    puts "\e[0;36m[#{forward}] [#{espro(forward)}]\e[0m\n"
-    if entire_logs[forward].empty?
-      puts "no log was found."
+  forward_list.each do |each_server|
+    server_type = "#{each_server[:server_type]}"
+    server_ip = "#{each_server[:ghost_ip]}"
+    puts server_type != "" ? "[#{server_type} #{server_ip} - #{espro(server_ip)}]" : "[#{server_ip} - #{espro(server_ip)}]"
+    if not each_server[:log].empty?
+      each_server[:log].each do |log_line|
+        puts log_line
+      end
     else
-      puts entire_logs[forward]
+      puts "could not find log. try increasing the number of retry and timeout?"
     end
-    puts "\n"
+    puts
   end
 
   if options[:purge]
     forward_list.each_with_index do |forward, index|
-      ghostip = forward.split.last.split("_").first
+      ghostip = forward[:ghost_ip]
 
       #if url does not exist, use arl from r log
       arl = nil
       if url.nil? and index.eql? 0
-        logs = entire_logs[forward]
+        logs = forward[:log]
         logs.each do |log_line|
           log_fields = log_line.split
           case log_fields[1]
@@ -608,16 +621,16 @@ if __FILE__ == $0
       end
 
       url = arl if not arl.nil?
-      puts "\e[0;36mPurge URL:\e[0m #{url}" if index.eql? 0
+      puts "Purge URL: #{url}" if index.eql? 0
 
-      printMsg "\e[0;36mPurging:\e[0m #{ghostip}"
+      printMsg "Purging: #{ghostip}"
       result = purgeObj(ghostip, url)
       if result == true
-        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Success\n"
+        printMsg "Purging: #{ghostip} - Success\n"
       elsif result == nil
-        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Object does not exist\n"
+        printMsg "Purging: #{ghostip} - Object does not exist\n"
       else
-        printMsg "\e[0;36mPurging:\e[0m #{ghostip} - Failed\n"
+        printMsg "Purging: #{ghostip} - Failed\n"
       end
     end
   end
