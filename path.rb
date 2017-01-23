@@ -429,6 +429,11 @@ if __FILE__ == $0
     uri = valid_url?(url)
     if not uri.host =~ Resolv::IPv4::Regex ? true : false
       akamai_domain?(uri.host)
+    elsif uri.host =~ Resolv::IPv4::Regex ? true : false
+      if not options[:header].nil? and options[:header].key? "Host"
+        hostname = options[:header]["Host"]
+        url = uri.scheme + "://" + hostname + uri.request_uri
+      end
     end
 
     curl = "#{CURL} -v -k -o /dev/null '#{uri.to_s}' -H 'Pragma: #{PRAGMA}'"
