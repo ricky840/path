@@ -148,30 +148,19 @@ def findForwardMachineFromImageLog(raw_logs)
     log = line.split
     if log[8] == ":fetch" #there could be multiple :fetch ex) watermark
       fetch_info = line.scan(/"([^"]*)"/).join(",").split(",")
-
-      forward_ip_list = []
       request_ids = fetch_info.last.split(".").reverse
       request_id_to_grep = request_ids.first
-
       fetch_info.each do |each|
         if each.split.last =~ Resolv::IPv4::Regex ? true : false
           edge_ipaddr = each.split.last
-          forward_ip_list.push(edge_ipaddr)
-        end
-      end
-
-      if forward_ip_list.length == request_ids.length
-        temp = Hash[forward_ip_list.zip(request_ids)]
-        temp.each do |ipaddress, request_id|
           forward_list.push({
-            :reqid => temp[ipaddress],
-            :forward_ipaddr => ipaddress,
+            :reqid => request_id_to_grep,
+            :forward_ipaddr => edge_ipaddr,
             :reqid_to_grep => request_id_to_grep,
-            :server_type => ""
+            :server_type => "edge"
           })
+          break
         end
-      else
-        $logger.warn "error number of request_id and server_ip does not match (image_log)"
       end
     end
   end
@@ -187,7 +176,7 @@ def ghostGrep(reqid, ipaddr, options={})
 
   $retry_ghostgrep.times do |index|
     $logger.info "(#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}"
-    printMsg("(#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}")
+    printMsg("crawling #{ipaddr} #{reqid} (#{index}/#{$retry_ghostgrep})")
 
     output = runCommand(shellcmd)
     if output
@@ -213,7 +202,7 @@ def ghostGrep(reqid, ipaddr, options={})
       break
     elsif logs.length == 0
       $logger.info "#{ipaddr} oops, could not find any logs".ljust(80)
-      countDown(RETRY_DELAY, "(#{index}/#{$retry_ghostgrep}) retrying on #{ipaddr} - #{reqid}")
+      countDown(RETRY_DELAY, "retrying #{ipaddr} #{reqid} (#{index}/#{$retry_ghostgrep})")
     end
 
     if index == $retry_ghostgrep - 1
@@ -432,7 +421,7 @@ if __FILE__ == $0
   output_redir = $stdout if options[:verbose]
   $logger = Logger.new(output_redir)
   $logger.formatter = proc do |severity, datetime, progname, msg|
-    puts "\e[0;36m#{severity}:\e[0m #{msg}"
+    puts "\e[0;36m#{severity}:\e[0m #{msg}".ljust(80)
   end
 
   #if there was url input
@@ -504,7 +493,7 @@ if __FILE__ == $0
     :client_ipaddr => "",
     :forward_ipaddr => "",
     :forward_hostname => "",
-    :server_type => ""
+    :server_type => "edge"
   })
 
   #gogogo
@@ -561,7 +550,7 @@ if __FILE__ == $0
     end
 
     #filter out forward_machine has already been processed
-    $logger.info "Processed list for now: #{processed_work_list.inspect}"
+    #$logger.info "Processed list for now: #{processed_work_list.inspect}"
     forward_machines_with_duplicates.each_with_index do |f_line, index|
       if processed_work_list.key? f_line[:forward_ipaddr] and processed_work_list[f_line[:forward_ipaddr]].include? f_line[:reqid_to_grep]
         $logger.info "Already processed: #{f_line[:forward_ipaddr]} #{f_line[:reqid_to_grep]}"
