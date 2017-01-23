@@ -176,7 +176,7 @@ def ghostGrep(reqid, ipaddr, options={})
 
   $retry_ghostgrep.times do |index|
     $logger.info "(#{index}/#{$retry_ghostgrep}) grep log from #{ipaddr}. request id #{reqid}"
-    printMsg("crawling #{ipaddr} #{reqid} (#{index}/#{$retry_ghostgrep})")
+    printMsg("crawling #{ipaddr}(#{espro(ipaddr)}) #{reqid} (#{index}/#{$retry_ghostgrep})")
 
     output = runCommand(shellcmd)
     if output
@@ -202,12 +202,12 @@ def ghostGrep(reqid, ipaddr, options={})
       break
     elsif logs.length == 0
       $logger.info "#{ipaddr} oops, could not find any logs".ljust(80)
-      countDown(RETRY_DELAY, "retrying #{ipaddr} #{reqid} (#{index}/#{$retry_ghostgrep})")
+      countDown(RETRY_DELAY, "retrying #{ipaddr}(#{espro(ipaddr)}) #{reqid} (#{index}/#{$retry_ghostgrep})")
     end
 
     if index == $retry_ghostgrep - 1
       $logger.warn "#{ipaddr} #{reqid} failed. try again?"
-      printMsg "#{ipaddr} #{reqid} failed. try again?"
+      printMsg "#{ipaddr}(#{espro(ipaddr)}) #{reqid} failed. try again?"
     end
   end
 
